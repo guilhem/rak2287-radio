@@ -1,0 +1,20 @@
+[Unit]
+Description=Black1 MeshCore EU Narrow repeater
+Conflicts=meshcore-rx-only.service
+After=meshcore-rx-only.service
+OnFailure=meshcore-rx-only.service
+
+[Service]
+Type=exec
+User=guilhem
+StateDirectory=meshcore-repeater
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/meshcore-repeater
+Environment=MESHCORE_DATA_DIR=/var/lib/meshcore-repeater
+UMask=0077
+ExecStartPre=/usr/bin/flock -n /dev/spidev0.0 /home/guilhem/black1-radio/reset_lgw.sh start
+ExecStart=/usr/local/libexec/meshcore-radio-repeater --enable-transmit --device /dev/spidev0.0
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=multi-user.target

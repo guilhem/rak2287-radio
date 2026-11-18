@@ -20,16 +20,16 @@
 #include "loragw_sx1250.h"
 #include "loragw_sx1302.h"
 #include "sx1250_spi.h"
+#include "sx1250_board.h"
 #include "sx1250_rx.h"
 #include "sx1250_tx.h"
-
-#include "sx1250_tx_warm.h"
+#include "sx1250_tx_handoff.h"
 int bench_radio_w(sx1250_op_code_t, uint8_t*, uint16_t, uint8_t);
 int bench_radio_r(sx1250_op_code_t, uint8_t*, uint16_t, uint8_t);
 static bool warm, wall, listening, tracking, acquiring, captured, active, skip_reset;
 static int64_t us, start_us, wall_origin, air_us, tx_us, wall_tx_us;
 static int64_t arrival = INT64_MAX, finish = INT64_MAX;
-static unsigned resets, transactions, transmissions, captures;
+static unsigned resets, transactions, transmissions;
 static bool injected_fault;
 static unsigned programmed_ticks;
 static int64_t observed_timeout_us;
@@ -161,17 +161,6 @@ int __wrap_sx1302_radio_reset(uint8_t rf, lgw_radio_type_t type) {
     }
     return __real_sx1302_radio_reset(rf, type);
 }
-int __real_sx1250_setup(uint8_t, uint32_t, bool);
-int __wrap_sx1250_setup(uint8_t rf, uint32_t hz, bool single) {
-    static bool initial = true;
-    if (warm && initial) {
-        assert(!rf && !tracking);
-        ++captures;
-        if (sx1250_tx_warm_capture_reset_sim()) return -1;
-    }
-    initial = false;
-    return __real_sx1250_setup(rf, hz, single);
-}
 int main(int argc, char **argv) {
     if (argc != 6) return 2;
     bool repeat = !strcmp(argv[1], "warm-reuse");
@@ -187,6 +176,7 @@ int main(int argc, char **argv) {
     assert(setenv("FAKE_TX","1",1) == 0 && setenv("IDLE","1",1) == 0);
     struct sx1250_rx_config cfg = {869618000,62500,16,8,8,0x12,true,false,0};
     assert(!sx1250_rx_open(argv[5], &cfg));
+    assert(sx1250_board_rf0_reset());
     int64_t offset = strtoll(argv[4], NULL, 10);
     if (fault && !strcmp(fault, "tx_timeout")) assert(setenv("FAKE_TX_FAULT","timeout",1) == 0);
     start_us = us + 2 * airtime(sizeof rx_frame);
@@ -195,12 +185,20 @@ int main(int argc, char **argv) {
     tracking = active = true;
     wall_origin = wall_now();
     unsigned timeout_ms = getenv("BENCH_TIMEOUT_MS") ? (unsigned)strtoul(getenv("BENCH_TIMEOUT_MS"), NULL, 10) : 3000;
-    int rc = warm ? sx1250_tx_send_warm_sim(payload,size,timeout_ms) : sx1250_tx_send(payload,size,timeout_ms);
+    struct sx1250_handoff_report report;
+    int rc = warm ? sx1250_tx_send_report(payload, size, timeout_ms, &report) :
+                    sx1250_tx_probe_handoff(payload, size, timeout_ms, 0, &report);
     int call_errno = errno;
     mark(RETURNED);
     tracking = active = false;
     bool short_timer = timeout_ms * INT64_C(1000) < air_us;
     if (transmissions) assert(programmed_ticks == 64u * timeout_ms);
+    assert(report.tx_started == (transmissions > 0));
+    assert(report.tx_done == (marks[DONE] > 0));
+    assert(report.rf1_rearmed == (marks[REARM] > 0));
+    assert(report.cold_recovery == (warm && (fault || short_timer)));
+    if (!wall && report.rf1_rearmed)
+        assert(report.downtime_ns / 1000 == marks[REARM] - marks[STANDBY]);
     if (short_timer || (fault && !strcmp(fault, "tx_timeout"))) {
         assert(rc == -1 && call_errno == ETIMEDOUT && transmissions == 1 && resets == (warm ? 1u : 2u) &&
                !marks[DONE] && marks[REARM] && marks[RETURNED] > marks[REARM]);
@@ -232,9 +230,9 @@ int main(int argc, char **argv) {
     if (repeat) {
         tracking = true;
         payload[0] ^= 0xff;
-        assert(!sx1250_tx_send_warm_sim(payload,size,3000));
+        assert(!sx1250_tx_send(payload, size, 3000));
         tracking = false;
-        assert(transmissions == 2 && !resets && captures == 1);
+        assert(transmissions == 2 && !resets);
         assert(fake_last_tx(sent, sizeof sent) == size && !memcmp(sent, payload, size));
         assert(fake_inject_rx(rx_frame, sizeof rx_frame));
         assert(sx1250_rx_next(&pkt,0) == 1 && pkt.size == sizeof rx_frame && !memcmp(pkt.payload,rx_frame,pkt.size));

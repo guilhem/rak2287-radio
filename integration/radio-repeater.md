@@ -52,7 +52,8 @@ access. The program locks it and writes the standard 96-byte MeshCore
 identity to `repeater.id` with private permissions. Keep the state directory
 to retain the repeater's public identity. An unreadable or invalid existing
 identity stops startup. Startup prints the public key for comparison with
-observed route hashes. The target uses the upstream forwarding and advert
+observed route hashes. `RADIO_RX_READY` confirms that RF1 is listening.
+The target uses the upstream forwarding and advert
 timers. Its anonymous login and peer command callbacks are disabled.
 
 The adapter requires 869.618 MHz, SF8, BW 62.5 kHz, CR 4/8, private sync 0x12,
@@ -92,8 +93,58 @@ The `busy_deferrals` counter counts these final-guard vetoes. Earlier
 backoffs in `isReceiving()` leave the packet in the queue and do not
 increment this counter.
 
-`startSendRaw` reports success after TxDone and verified RF1 rearming.
-An I/O or transmit timeout error stops the process and closes the radio.
+`startSendRaw` uses the generic driver's no-reset RF0 handover. It reports
+success after TxDone and verified RF1 rearming, including a successful cold
+recovery after TxDone. Each RF0 attempt logs `RADIO_TX` with RF1 downtime,
+TxDone, the RF1 rearm result and any recovery. A failed send stops the
+process and closes the radio.
 The adapter retries only an explicitly unstarted transmission. The final
 `sent` count covers completed driver transactions. A peer must verify
 physical reception.
+
+## Run at boot on black1
+
+Once the RF setup has been qualified for continuous operation, install the
+service and the native binary from the repository root on black1:
+
+```sh
+sudo install -D -m 0755 build/meshcore-radio-repeater /usr/local/libexec/meshcore-radio-repeater
+sudo install -m 0644 integration/meshcore-repeater.service /etc/systemd/system/meshcore-repeater.service
+sudo systemctl daemon-reload
+sudo systemctl disable meshcore-rx-only.service
+sudo systemctl enable --now meshcore-repeater.service
+journalctl -u meshcore-repeater.service -f
+```
+
+The unit stores the identity under `/var/lib/meshcore-repeater`. It stops
+the receive-only service to take SPI ownership. On failure it starts
+receive-only monitoring for the rest of the boot. Restore that mode as
+the boot default with:
+
+```sh
+sudo systemctl disable --now meshcore-repeater.service
+sudo systemctl enable --now meshcore-rx-only.service
+```
+
+## Hardware relay check
+
+On black1, a one-frame test harness passed an over-the-air EU Narrow message
+from RF1 to the native repeater. The test checked that MeshCore preserved the
+body and added the public key prefix as a two-byte hop before allowing one
+physical send. The 71-byte relay reached RF0 TxDone and verified RF1 rearm.
+The send call, including both resets, took 1.965 s. The originating node's
+app reported one repeater response, with the matching two-byte route
+`6143`, RSSI −115 dBm and SNR −4.5 dB. The test unit exited and the
+receive-only service recovered the SPI device.
+
+A subsequent monitored run used the installed repeater binary with the generic
+no-reset send path. It accepted 18 MeshCore packets, recognized four flood
+duplicates, and completed 12 sends with TxDone and RF1 rearmed on every send.
+All 12 completed without a recovery reset. RF1 was unavailable for 853–861 ms
+for the five 55-byte group messages in the run. The companion showed the
+repeater hop `B442` for two of the five test messages.
+
+The installed systemd unit loaded the same identity and reached RF1 listening
+on a separate start. An eight-second runtime limit injected for the test
+stopped the repeater and triggered the receive-only service through
+`OnFailure=`. The runtime limit was removed after verification.

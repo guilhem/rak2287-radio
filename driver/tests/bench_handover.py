@@ -9,20 +9,21 @@ import tempfile
 DRIVER = Path(__file__).resolve().parents[1]
 
 
-def build(hal, tmp):
+def build(hal, usp_radio, tmp):
     inc = hal / "libloragw/inc"
     src = hal / "libloragw/src"
     cc = shlex.split(os.environ.get("CC", "cc"))
     common = cc + ["-std=gnu11", "-O2", "-ffunction-sections", "-fdata-sections", "-UNDEBUG",
-                   "-I", str(inc), "-I", str(hal / "libtools/inc"), "-I", str(DRIVER)]
+                   "-I", str(inc), "-I", str(hal / "libtools/inc"), "-I", str(DRIVER),
+                   "-I", str(usp_radio)]
     clocks = ["-Dclock_gettime=bench_clock_gettime", "-Dnanosleep=bench_nanosleep"]
     objects = []
     for path, opts in [
         (src / "loragw_sx1302.c", []), (src / "loragw_sx1250.c", []),
         (src / "sx1250_spi.c", ["-Dioctl=bench_ioctl"]),
         (DRIVER / "sx1250_board.c", []), (DRIVER / "sx1250_rx.c", clocks),
+        (DRIVER / "sx1250_usp.c", []), (usp_radio / "sx126x.c", []),
         (DRIVER / "sx1250_tx.c", clocks),
-        (DRIVER / "sx1250_tx.c", clocks + ["-DSX1250_WARM_SIMULATION"]),
         (DRIVER / "tests/fake_hal.c", ["-DHANDOVER_BENCH"]),
         (DRIVER / "tests/handover.c", []),
     ]:
@@ -30,7 +31,7 @@ def build(hal, tmp):
         subprocess.run(common + opts + ["-c", path, "-o", obj], check=True)
         objects.append(obj)
     exe = tmp / "handover"
-    subprocess.run(cc + objects + ["-Wl,--gc-sections,--wrap=sx1250_setup,--wrap=sx1302_radio_reset",
+    subprocess.run(cc + objects + ["-Wl,--gc-sections,--wrap=sx1302_radio_reset",
                                     "-lm", "-o", exe], check=True)
     return exe
 
@@ -112,9 +113,10 @@ def bench(exe, wall):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hal", type=Path, required=True)
+    parser.add_argument("--usp-radio", type=Path, required=True)
     parser.add_argument("--wall-clock", action="store_true")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="handover-") as tmp:
         temp = Path(tmp)
         (temp / "fake-spi").touch()
-        bench(build(args.hal.resolve(), temp), args.wall_clock)
+        bench(build(args.hal.resolve(), args.usp_radio.resolve(), temp), args.wall_clock)

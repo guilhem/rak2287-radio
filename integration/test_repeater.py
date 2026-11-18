@@ -38,6 +38,11 @@ class RepeaterTest(unittest.TestCase):
             frames = re.findall(r"FAKE RF0 TxDone path=(\w+) payload=(\w+)", result.stdout)
             self.assertEqual(frames, [(public[:4], "aa01020304050607"),
                                       (public[:4], "bb0908070605040302")])
+            reports = re.findall(r"RADIO_TX bytes=\d+ rf1_downtime_ns=(\d+) "
+                                 r"tx_started=1 tx_done=1 rf1_rearmed=1 cold_recovery=0 "
+                                 r"stage=none error=0", result.stdout)
+            self.assertEqual(len(reports), len(frames), result.stdout)
+            self.assertTrue(all(int(ns) > 0 for ns in reports), result.stdout)
             self.assertIn("received=3 flood=3 direct=0 flood_dups=1 direct_dups=0 "
                           "rejected=0 sent=2 flood_tx=2 direct_tx=0", result.stdout)
         self.assertEqual(keys[0], keys[1])

@@ -7,3 +7,6 @@
 [submodule "deps/crypto"]
 	path = deps/crypto
 	url = https://github.com/rweather/arduinolibs.git
+[submodule "deps/usp"]
+	path = deps/usp
+	url = https://github.com/Lora-net/usp.git

@@ -28,11 +28,26 @@ struct sx1250_rx_packet {
     float rssi_dbm, snr_db;
 };
 
+/* Validate the RF1 LoRa profile without opening the board. */
+bool sx1250_lora_profile_valid(const struct sx1250_rx_config *config);
+/* LoRa packet airtime in milliseconds, rounded up. Returns 0 for an invalid
+ * profile or payload size. No board connection required. */
+uint32_t sx1250_lora_airtime_ms(const struct sx1250_rx_config *config, uint8_t size);
+
 /* Serialize all operations. Call open after stopping other radio software
  * and resetting the board. Call close once after a successful open, including
  * after next() errors. Before starting the stock forwarder, reset as usual.
  * open/close return 0 or -1 with errno. The stock HAL may log to stdout. */
 int sx1250_rx_open(const char *spi_path, const struct sx1250_rx_config *config);
+/* Change only RF1 and rearm RX under the existing board lock. EAGAIN leaves
+ * terminal events for next(). Without force, partial RX activity also gives
+ * EAGAIN. On EIO after a hardware write, close and reopen the board. */
+int sx1250_rx_reconfigure(const struct sx1250_rx_config *config, bool force);
+/* After a forced reconfiguration returns EAGAIN, drain its frozen terminal
+ * event. Returns 1 for a complete packet, 0 for an invalid reception, or
+ * -1 with errno. The pending event is acknowledged and RF1 stays in standby.
+ * Retry the forced reconfiguration before calling next() or activity(). */
+int sx1250_rx_drain_for_switch(struct sx1250_rx_packet *packet);
 /* Returns 1 for a complete packet, 0 at the timeout, -1 on error with errno.
  * timeout_ms >= 0. Zero polls once. No packet is copied on timeout/error.
  * One reception latches the FIFO until next() reads and rearms the radio.

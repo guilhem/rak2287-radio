@@ -22,6 +22,8 @@ static unsigned tx_mode, tx_type, tx_irq, tx_size;
 static uint8_t tx_regs[65536], tx_fifo[256], sent[255], sent_size;
 static uint8_t injected[255], injected_size;
 static bool restoring, tx_started;
+static unsigned tx_commands;
+static bool injected_warm_fault;
 
 #ifdef HANDOVER_BENCH
 /* The handover executable links the pinned reset, setup, calibration and SPI
@@ -34,7 +36,6 @@ static const struct { uint16_t addr; uint8_t value; } bench_reset_fields[] = {
     {0x06a1,0x51}, {0x06a2,0x52}, {0x06a3,0x53}, {0x08b6,0x61},
     {0x088f,0x71}, {0x0890,0x72}, {0x0891,0x73}
 };
-bool fake_warm_simulation_active(void) { return true; }
 #endif
 
 static bool fault(const char *name) {
@@ -121,6 +122,9 @@ static int tx_write(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
     case WRITE_BUFFER: assert((size_t)p[0] + n - 1 <= sizeof tx_fifo);
         memcpy(tx_fifo + p[0], p + 1, n - 1); break;
     case SET_TX:
+        assert(!getenv("FAKE_FORBID_TX"));
+        ++tx_commands;
+        assert(!getenv("FAKE_SINGLE_TX") || tx_commands == 1);
         assert(n == 3 && (p[0] || p[1] || p[2]) && tx_mode == 3 && mode == 3 && tx_size);
         assert(!lines[SX1302_REG_AGC_MCU_RF_EN_A_LNA_EN] && !lines[SX1302_REG_AGC_MCU_RF_EN_B_LNA_EN]);
         assert(!lines[SX1302_REG_AGC_MCU_RF_EN_A_PA_EN] && !lines[SX1302_REG_AGC_MCU_RF_EN_B_PA_EN]);
@@ -142,7 +146,9 @@ static int tx_write(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
 }
 
 static int tx_read(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
-    assert(getenv("FAKE_TX") && n <= 253);
+    assert(n <= 253);
+    /* The receive-only startup can snapshot the reset-state RF0 pins. */
+    assert(getenv("FAKE_TX") || (tx_mode == 2 && (op == GET_STATUS || op == READ_REGISTER)));
     uint8_t status = 0x82 | (tx_mode << 4);
     if ((unsigned)op == 0x11) { p[0] = status; p[1] = tx_type; return 0; }
     switch (op) {
@@ -165,9 +171,20 @@ static int tx_read(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
             if (fault("status")) status = 0xa8;
         }
 #endif
-        p[0] = status; p[1] = tx_irq >> 8; p[2] = tx_irq; break;
+        p[0] = status; p[1] = tx_irq >> 8; p[2] = tx_irq;
+        if (fault("warm_restore") && tx_started && tx_mode == 3 && !tx_irq && !injected_warm_fault) {
+            p[2] |= 0x40;
+            injected_warm_fault = true;
+        }
+        break;
     case READ_REGISTER: { unsigned addr = (p[0] << 8) | p[1];
-        p[2] = status; memcpy(p + 3, tx_regs + addr, n - 3); break; }
+        p[2] = status; memcpy(p + 3, tx_regs + addr, n - 3);
+        if (addr == 0x0587 && tx_mode == 2 && tx_regs[addr] != 0x0b && fault("pinmode")) p[3] ^= 1;
+        if (addr == 0x0587 && tx_mode == 5 && fault("warm_prepare") && !injected_warm_fault) {
+            p[3] ^= 1;
+            injected_warm_fault = true;
+        }
+        break; }
     case READ_BUFFER: { unsigned offset = p[0];
         p[1] = status; memcpy(p + 2, tx_fifo + offset, n - 2);
         if (fault("readback")) p[2] ^= 1;
@@ -185,6 +202,8 @@ int lgw_connect(lgw_com_type_t t, const char *p) {
     assert(t == LGW_COM_SPI && p);
     connected = true; regs[0x0587] = 0x20; arms = 0; irq = 0; sent_size = injected_size = 0;
     restoring = tx_started = false; memset(lines, 0, sizeof lines);
+    tx_commands = 0;
+    injected_warm_fault = false;
     puts("HAL connected");
     return getenv("FAIL_CONNECT") ? -1 : 0;
 }
@@ -194,6 +213,14 @@ int lgw_reg_r(uint16_t reg, int32_t *v) {
     else if (reg == SX1302_REG_AGC_MCU_CTRL_MCU_CLEAR || reg == SX1302_REG_ARB_MCU_CTRL_MCU_CLEAR)
         *v = !getenv("BUSY_FW");
     else *v = lines[reg];
+    return 0;
+}
+int lgw_reg_rb(uint16_t reg, uint8_t *data, uint16_t size) {
+    assert(reg == SX1302_REG_TIMESTAMP_TIMESTAMP_PPS_MSB2_TIMESTAMP_PPS && size == 8);
+    static uint32_t counter;
+    counter += 32000;
+    memset(data, 0, 4);
+    for (unsigned i = 0; i < 4; ++i) data[4 + i] = (uint8_t)(counter >> (24 - 8 * i));
     return 0;
 }
 int lgw_reg_w(uint16_t reg, int32_t val) {
@@ -218,7 +245,8 @@ int lgw_reg_w(uint16_t reg, int32_t val) {
 int sx1302_radio_host_ctrl(bool b) { (void)b; return 0; }
 int sx1302_radio_reset(uint8_t c, lgw_radio_type_t t) { assert(c <= 1 && t == LGW_RADIO_TYPE_SX1250);
     lines[SX1302_REG_COMMON_CTRL0_CLK32_RIF_CTRL] = 0;
-    if (!c) { tx_mode = 2; tx_irq = 0; tx_regs[0x0587] = fault("pinmode") ? 0 : regs[0x0587]; restoring = tx_started; }
+    if (!c) { tx_mode = 2; tx_irq = 0; tx_type = PACKET_TYPE_GFSK;
+        tx_regs[0x0587] = fault("pinmode") ? 0 : regs[0x0587]; restoring = tx_started; }
     return 0; }
 int sx1302_radio_set_mode(uint8_t c, lgw_radio_type_t t) { assert(c <= 1 && t == LGW_RADIO_TYPE_SX1250); return 0; }
 int sx1302_radio_clock_select(uint8_t c) {
@@ -230,7 +258,8 @@ int sx1302_radio_clock_select(uint8_t c) {
     return 0;
 }
 int sx1302_pa_lna_lut_configure(struct lgw_conf_board_s *b) { assert(!b->full_duplex); return 0; }
-int sx1250_setup(uint8_t c, uint32_t f, bool single) { assert(!c && f && !single); tx_regs[0x0587] = 0x0b; tx_mode = 5; return 0; }
+int sx1250_setup(uint8_t c, uint32_t f, bool single) { assert(!c && f && !single);
+    tx_regs[0x0587] = 0x0b; tx_mode = 5; restoring = tx_started; return 0; }
 int sx1250_calibrate(uint8_t c, uint32_t f) { assert(f && ((c == 1 && mode == 2) || (!c && tx_mode == 2 && getenv("FAKE_TX")))); return 0; }
 void wait_ms(unsigned long t) { (void)t; }
 #else

@@ -17,6 +17,28 @@ static const bool radio_verbose = false;
 static atomic_flag owner = ATOMIC_FLAG_INIT;
 static int lock_fd = -1;
 static bool connected, configured;
+static bool rf0_reset_valid;
+static uint8_t rf0_reset_values[SX1250_RF0_RESET_SPAN_COUNT][4];
+
+/* The pinned HAL changes these registers when entering its I/Q bridge mode. */
+const struct sx1250_reg_span sx1250_rf0_reset_spans[SX1250_RF0_RESET_SPAN_COUNT] = {
+    {0x0587, 1}, {0x0580, 1}, {0x0582, 4}, {0x06a1, 3}, {0x08b6, 1}, {0x088f, 3}
+};
+
+static void capture_rf0_reset(void) {
+    rf0_reset_valid = false;
+    if (bank_status(0, GET_STATUS, 2)) return;
+    for (size_t i = 0; i < SX1250_RF0_RESET_SPAN_COUNT; ++i) {
+        struct sx1250_reg_span span = sx1250_rf0_reset_spans[i];
+        if (bank_read(0, READ_REGISTER, (uint8_t[]){span.address >> 8, span.address}, 2,
+                      rf0_reset_values[i], span.size)) return;
+    }
+    rf0_reset_valid = rf0_reset_values[0][0] != 0x0b;
+}
+
+const uint8_t (*sx1250_board_rf0_reset(void))[4] {
+    return rf0_reset_valid ? rf0_reset_values : NULL;
+}
 
 int sx1250_board_release(void) {
     if (lock_fd < 0) { errno = EINVAL; return -1; }
@@ -34,7 +56,7 @@ int sx1250_board_release(void) {
     if (connected) error |= lgw_disconnect();
     error |= close(lock_fd);
     lock_fd = -1;
-    connected = configured = false;
+    connected = configured = rf0_reset_valid = false;
     atomic_flag_clear(&owner);
     if (error) { errno = EIO; return -1; }
     return 0;
@@ -71,7 +93,9 @@ int sx1250_board_acquire(const char *path, uint32_t hz) {
     uint32_t frf = SX1250_FREQ_TO_REG(hz);
     uint8_t freq[] = {frf >> 24, frf >> 16, frf >> 8, frf}, check[4];
     if (sx1302_radio_host_ctrl(true) || sx1302_radio_reset(0, LGW_RADIO_TYPE_SX1250) ||
-        sx1302_radio_set_mode(0, LGW_RADIO_TYPE_SX1250) || sx1250_setup(0, hz, false) ||
+        sx1302_radio_set_mode(0, LGW_RADIO_TYPE_SX1250)) goto fail;
+    capture_rf0_reset();
+    if (sx1250_setup(0, hz, false) ||
         sx1302_radio_reset(chain, LGW_RADIO_TYPE_SX1250) ||
         sx1302_radio_set_mode(chain, LGW_RADIO_TYPE_SX1250) || sx1302_radio_clock_select(0) ||
         sx1302_pa_lna_lut_configure(&board) ||

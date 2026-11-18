@@ -2,6 +2,7 @@
  * schedules air events around polls; every poll goes through the real driver. */
 #define _POSIX_C_SOURCE 200809L
 #include "sx1250_rx.h"
+#include "sx1250_tx.h"
 #include "tests/fake_hal.h"
 #include <assert.h>
 #include <signal.h>
@@ -104,8 +105,10 @@ static int activity_next(struct sx1250_rx_packet* pkt, int timeout_ms) {
     return __real_sx1250_rx_next(pkt, timeout_ms);
 }
 
-extern int __real_sx1250_tx_send(const uint8_t *payload, size_t len, unsigned timeout_ms);
-int __wrap_sx1250_tx_send(const uint8_t *payload, size_t len, unsigned timeout_ms) {
+extern int __real_sx1250_tx_send_report(const uint8_t *payload, size_t len, unsigned timeout_ms,
+                                       struct sx1250_handoff_report *report);
+int __wrap_sx1250_tx_send_report(const uint8_t *payload, size_t len, unsigned timeout_ms,
+                               struct sx1250_handoff_report *report) {
     static bool injected;
     if (getenv("ACTIVITY_SCENARIO")) {
         assert(queried && !sent);
@@ -115,7 +118,7 @@ int __wrap_sx1250_tx_send(const uint8_t *payload, size_t len, unsigned timeout_m
             pending = true;
         }
         in_tx = true;
-        int rc = __real_sx1250_tx_send(payload, len, timeout_ms);
+        int rc = __real_sx1250_tx_send_report(payload, len, timeout_ms, report);
         in_tx = false;
         if (rc == -1 && errno == EAGAIN) {
             assert(!vetoed && (scenario("race") || scenario("force")));
@@ -130,7 +133,7 @@ int __wrap_sx1250_tx_send(const uint8_t *payload, size_t len, unsigned timeout_m
         assert(fake_inject_rx(first, sizeof first));
         injected = true;
     }
-    return __real_sx1250_tx_send(payload, len, timeout_ms);
+    return __real_sx1250_tx_send_report(payload, len, timeout_ms, report);
 }
 
 int __wrap_sx1250_rx_next(struct sx1250_rx_packet *pkt, int timeout_ms) {
