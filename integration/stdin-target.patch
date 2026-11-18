@@ -1,0 +1,9 @@
+--- MyMesh.cpp
++++ MyMesh.cpp
+@@ -1288,5 +1288,5 @@
+ void MyMesh::formatRadioDiagReply(char *reply) {
+-#ifdef __linux__
++#if defined(__linux__) && !defined(MESHCORE_EXTERNAL_RX)
+   const uint8_t st = radio_driver.debugGetStatus();
+   const uint16_t irq = radio_driver.debugGetIrqStatus();
+   const uint16_t errs = radio_driver.debugGetDeviceErrors();

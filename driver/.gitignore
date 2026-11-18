@@ -1,0 +1,5 @@
+*.o
+*.a
+/sx1250-rx
+/gfsk_rx
+__pycache__/

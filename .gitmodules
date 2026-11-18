@@ -1,0 +1,9 @@
+[submodule "deps/hal"]
+	path = deps/hal
+	url = https://github.com/Lora-net/sx1302_hal.git
+[submodule "deps/meshcore"]
+	path = deps/meshcore
+	url = https://github.com/dabeani/MeshCoreRPI.git
+[submodule "deps/crypto"]
+	path = deps/crypto
+	url = https://github.com/rweather/arduinolibs.git
