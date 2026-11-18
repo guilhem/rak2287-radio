@@ -5,7 +5,7 @@ CRYPTO := $(CURDIR)/deps/crypto
 BUILD := $(CURDIR)/build
 ADAPTER = $(MAKE) -C integration HAL="$(HAL)" MESHCORE="$(MESHCORE)" CRYPTO="$(CRYPTO)" BUILD="$(BUILD)"
 
-.PHONY: all hal receiver monitor check radio-repeater
+.PHONY: all hal receiver monitor check radio-repeater bench-handover bench-handover-wall
 all: receiver
 
 hal:
@@ -24,3 +24,7 @@ check: receiver
 
 radio-repeater: hal
 	$(ADAPTER) radio-repeater
+
+bench-handover bench-handover-wall:
+	$(MAKE) -C "$(HAL)/libloragw" inc/config.h
+	$(MAKE) -C driver HAL="$(HAL)" $@

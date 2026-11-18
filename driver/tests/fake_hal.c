@@ -23,10 +23,44 @@ static uint8_t tx_regs[65536], tx_fifo[256], sent[255], sent_size;
 static uint8_t injected[255], injected_size;
 static bool restoring, tx_started;
 
+#ifdef HANDOVER_BENCH
+/* The handover executable links the pinned reset, setup, calibration and SPI
+ * implementations; only their hardware-facing register effects are modeled. */
+extern unsigned bench_due_tx_irq(void);
+/* Synthetic, deliberately distinct register defaults. These values exercise
+ * snapshot/restore, not assumptions about silicon factory reset contents. */
+static const struct { uint16_t addr; uint8_t value; } bench_reset_fields[] = {
+    {0x0580,0x41}, {0x0582,0x42}, {0x0583,0x43}, {0x0584,0x44}, {0x0585,0x45},
+    {0x06a1,0x51}, {0x06a2,0x52}, {0x06a3,0x53}, {0x08b6,0x61},
+    {0x088f,0x71}, {0x0890,0x72}, {0x0891,0x73}
+};
+bool fake_warm_simulation_active(void) { return true; }
+#endif
+
 static bool fault(const char *name) {
     const char *f = getenv("FAKE_TX_FAULT");
     return f && !strcmp(f, name);
 }
+
+#ifdef HANDOVER_BENCH
+/* Advance the radio independently of the host's next IRQ read. Once the
+ * first terminal event has latched, later polls cannot change its outcome. */
+void fake_bench_latch_tx(void) {
+    if (tx_mode != 6 || fault("deadline")) return;
+    unsigned event = bench_due_tx_irq();
+    if (!event) return;
+    tx_mode = 2;
+    tx_irq = fault("conflict") ? 0x201 : fault("timeout") ? 0x200 : event;
+    if (tx_irq == 1) {
+        memcpy(sent, tx_fifo, tx_size);
+        sent_size = tx_size;
+    }
+}
+
+static const struct { uint16_t addr; uint8_t value; } bench_bridge_fields[] = {
+    {0x0736,0x91}, {0x0740,0x92}, {0x0741,0x93}, {0x08d8,0x94}, {0x0889,0x91}, {0x08e7,0x96}
+};
+#endif
 
 size_t fake_last_tx(uint8_t *data, size_t capacity) {
     if (!data || capacity < sent_size) return 0;
@@ -54,6 +88,14 @@ static int tx_write(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
     switch (op) {
     case SET_STANDBY: tx_mode = 2 + p[0]; break;
     case CALIBRATE: assert(tx_mode == 2); break;
+#ifdef HANDOVER_BENCH
+    case CALIBRATE_IMAGE: assert(tx_mode == 2 && n == 2); break;
+    case SET_RX:
+        assert(n == 3 && p[0] == 255 && p[1] == 255 && p[2] == 255);
+        for (size_t i = 0; i < sizeof bench_bridge_fields / sizeof *bench_bridge_fields; ++i)
+            assert(tx_regs[bench_bridge_fields[i].addr] == bench_bridge_fields[i].value);
+        tx_mode = 5; break;
+#endif
     case SET_RF_FREQUENCY: memcpy(tx_regs + 0x088b, p, 4); break;
     case SET_PACKET_TYPE: tx_type = p[0]; break;
     case WRITE_REGISTER: memcpy(tx_regs + ((p[0] << 8) | p[1]), p + 2, n - 2); break;
@@ -61,7 +103,12 @@ static int tx_write(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
     case SET_PACKET_PARAMS:
         assert(tx_mode == 3 && n == 6 && !memcmp(p, rf1_packet, 3) && !memcmp(p+4, rf1_packet+4, 2));
         tx_size = p[3]; break;
-    case SET_PA_CONFIG: assert(n == 4 && p[0] == 2 && p[1] == 2 && !p[2] && p[3] == 1); break;
+    case SET_PA_CONFIG:
+        assert(n == 4 && p[0] == 2 && p[1] == 2 && !p[2] && p[3] == 1);
+#ifdef HANDOVER_BENCH
+        tx_regs[0x08e7] = 0xa7; /* Synthetic OCP side effect, not a silicon value. */
+#endif
+        break;
     case SET_TX_PARAMS: assert(n == 2 && (int8_t)p[0] == -9 && p[1] == SET_RAMP_200U); break;
     case SET_BUFFER_BASE_ADDRESS: case SET_DIO_IRQ_PARAMS: break;
     case CLR_IRQ_STATUS: tx_irq = 0; break;
@@ -74,6 +121,12 @@ static int tx_write(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
         assert(!lines[SX1302_REG_COMMON_CTRL0_CLK32_RIF_CTRL] && tx_regs[0x0587] == regs[0x0587]);
         assert(tx_type == PACKET_TYPE_LORA && !memcmp(tx_regs + 0x088b, regs + 0x088b, 4) &&
                !memcmp(tx_regs + 0x0740, regs + 0x0740, 2));
+#ifdef HANDOVER_BENCH
+        for (size_t i = 0; i < sizeof bench_bridge_fields / sizeof *bench_bridge_fields; ++i)
+            assert(tx_regs[bench_bridge_fields[i].addr] != bench_bridge_fields[i].value);
+        for (size_t i = 0; i < sizeof bench_reset_fields / sizeof *bench_reset_fields; ++i)
+            assert(tx_regs[bench_reset_fields[i].addr] == bench_reset_fields[i].value);
+#endif
         tx_started = true;
         if (fault("write")) return -1;
         tx_mode = 6; break;
@@ -88,7 +141,13 @@ static int tx_read(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
     if ((unsigned)op == 0x11) { p[0] = status; p[1] = tx_type; return 0; }
     switch (op) {
     case GET_STATUS: p[0] = status; break;
+#ifdef HANDOVER_BENCH
+    case GET_DEVICE_ERRORS: memset(p, 0, n); break;
+#endif
     case GET_IRQ_STATUS:
+#ifdef HANDOVER_BENCH
+        if (tx_irq) status = tx_irq == 1 ? 0xac : 0xa6;
+#else
         if (tx_mode == 6 && !fault("deadline")) {
             tx_mode = 2; tx_irq = fault("conflict") ? 0x201 : fault("timeout") ? 0x200 : 1;
             status = tx_irq == 1 ? 0xac : 0xa6;
@@ -99,6 +158,7 @@ static int tx_read(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
             }
             if (fault("status")) status = 0xa8;
         }
+#endif
         p[0] = status; p[1] = tx_irq >> 8; p[2] = tx_irq; break;
     case READ_REGISTER: { unsigned addr = (p[0] << 8) | p[1];
         p[2] = status; memcpy(p + 3, tx_regs + addr, n - 3); break; }
@@ -111,7 +171,10 @@ static int tx_read(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
     return 0;
 }
 
-void *lgw_com_target(void) { return connected ? regs : NULL; }
+void *lgw_com_target(void) {
+    static int fake_fd = -1;
+    return connected ? &fake_fd : NULL;
+}
 int lgw_connect(lgw_com_type_t t, const char *p) {
     assert(t == LGW_COM_SPI && p);
     connected = true; regs[0x0587] = 0x20; arms = 0; irq = 0; sent_size = injected_size = 0;
@@ -130,9 +193,22 @@ int lgw_reg_r(uint16_t reg, int32_t *v) {
 int lgw_reg_w(uint16_t reg, int32_t val) {
     if (reg == SX1302_REG_AGC_MCU_RF_EN_A_PA_EN || reg == SX1302_REG_AGC_MCU_RF_EN_B_PA_EN)
         assert(val == 0);
+#ifdef HANDOVER_BENCH
+    if (reg == SX1302_REG_AGC_MCU_RF_EN_A_RADIO_RST && val == 1) {
+        tx_mode = 2; tx_irq = 0; tx_type = PACKET_TYPE_GFSK;
+        memset(tx_regs, 0, sizeof tx_regs);
+        for (size_t i = 0; i < sizeof bench_reset_fields / sizeof *bench_reset_fields; ++i)
+            tx_regs[bench_reset_fields[i].addr] = bench_reset_fields[i].value;
+        for (size_t i = 0; i < sizeof bench_bridge_fields / sizeof *bench_bridge_fields; ++i)
+            tx_regs[bench_bridge_fields[i].addr] = bench_bridge_fields[i].value;
+        tx_regs[0x0587] = regs[0x0587];
+        restoring = tx_started;
+    }
+#endif
     lines[reg] = val;
     return 0;
 }
+#ifndef HANDOVER_BENCH
 int sx1302_radio_host_ctrl(bool b) { (void)b; return 0; }
 int sx1302_radio_reset(uint8_t c, lgw_radio_type_t t) { assert(c <= 1 && t == LGW_RADIO_TYPE_SX1250);
     lines[SX1302_REG_COMMON_CTRL0_CLK32_RIF_CTRL] = 0;
@@ -151,6 +227,10 @@ int sx1302_pa_lna_lut_configure(struct lgw_conf_board_s *b) { assert(!b->full_du
 int sx1250_setup(uint8_t c, uint32_t f, bool single) { assert(!c && f && !single); tx_regs[0x0587] = 0x0b; tx_mode = 5; return 0; }
 int sx1250_calibrate(uint8_t c, uint32_t f) { assert(f && ((c == 1 && mode == 2) || (!c && tx_mode == 2 && getenv("FAKE_TX")))); return 0; }
 void wait_ms(unsigned long t) { (void)t; }
+#else
+#define sx1250_reg_w bench_radio_w
+#define sx1250_reg_r bench_radio_r
+#endif
 
 int sx1250_reg_w(sx1250_op_code_t op, uint8_t *p, uint16_t n, uint8_t c) {
     if (!c) return tx_write(op, p, n);
@@ -160,6 +240,9 @@ int sx1250_reg_w(sx1250_op_code_t op, uint8_t *p, uint16_t n, uint8_t c) {
         if (irq && arms == 1 && !getenv("EARLY") && !getenv("FAKE_TX")) irq |= 0x40; /* CRC error becomes visible on freeze. */
         mode = 2 + p[0]; break;
     case CALIBRATE: assert(mode == 2); break;
+#ifdef HANDOVER_BENCH
+    case CALIBRATE_IMAGE: assert(mode == 2 && n == 2); break;
+#endif
     case SET_RF_FREQUENCY: memcpy(regs + 0x088b, p, 4); break;
     case SET_PACKET_TYPE: packet_type = p[0]; break;
     case WRITE_REGISTER: memcpy(regs + ((p[0] << 8) | p[1]), p + 2, n - 2); break;
@@ -199,6 +282,9 @@ int sx1250_reg_r(sx1250_op_code_t op, uint8_t *p, uint16_t n, uint8_t c) {
     if ((unsigned)op == 0x11) { p[0] = status; p[1] = packet_type; return 0; }
     switch (op) {
     case GET_STATUS: p[0] = status; break;
+#ifdef HANDOVER_BENCH
+    case GET_DEVICE_ERRORS: memset(p, 0, n); break;
+#endif
     case READ_REGISTER: {
         unsigned addr = (p[0] << 8) | p[1];
         if (getenv("IMPLICIT")) assert(addr != 0x0749 && addr != 0x076b);

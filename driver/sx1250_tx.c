@@ -32,10 +32,18 @@ static int lnas(int value) {
     return result;
 }
 
-static int restore(uint32_t frequency_hz) {
-    int muted = pa_off();
+static int enable_verified_rx(void) {
     uint8_t bridge;
     int32_t rif, clock_a, clock_b;
+    return bank_read(tx_radio, READ_REGISTER, (uint8_t[]){5, 0x87}, 2, &bridge, 1) || bridge != 0x0b ||
+        lgw_reg_r(SX1302_REG_COMMON_CTRL0_CLK32_RIF_CTRL, &rif) || rif != 1 ||
+        lgw_reg_r(SX1302_REG_CLK_CTRL_CLK_SEL_CLK_RADIO_A_SEL, &clock_a) || clock_a != 1 ||
+        lgw_reg_r(SX1302_REG_CLK_CTRL_CLK_SEL_CLK_RADIO_B_SEL, &clock_b) || clock_b != 0 ||
+        lnas(1) || sx1250_rx_rearm();
+}
+
+static int restore(uint32_t frequency_hz) {
+    int muted = pa_off();
     /* Attempt an immediate RF abort; a verified hardware reset follows even if
      * this command failed or the status of the triggering SetTx is unknown. */
     (void)sx1250_reg_w(SET_STANDBY, (uint8_t[]){STDBY_RC}, 1, tx_radio);
@@ -44,11 +52,7 @@ static int restore(uint32_t frequency_hz) {
     if (sx1302_radio_reset(tx_radio, LGW_RADIO_TYPE_SX1250) || muted ||
         sx1302_radio_set_mode(tx_radio, LGW_RADIO_TYPE_SX1250) ||
         sx1250_setup(tx_radio, frequency_hz, false) || sx1302_radio_clock_select(tx_radio) ||
-        bank_read(tx_radio, READ_REGISTER, (uint8_t[]){5, 0x87}, 2, &bridge, 1) || bridge != 0x0b ||
-        lgw_reg_r(SX1302_REG_COMMON_CTRL0_CLK32_RIF_CTRL, &rif) || rif != 1 ||
-        lgw_reg_r(SX1302_REG_CLK_CTRL_CLK_SEL_CLK_RADIO_A_SEL, &clock_a) || clock_a != 1 ||
-        lgw_reg_r(SX1302_REG_CLK_CTRL_CLK_SEL_CLK_RADIO_B_SEL, &clock_b) || clock_b != 0 ||
-        lnas(1) || sx1250_rx_rearm()) {
+        enable_verified_rx()) {
         pa_off();
         lnas(0);
         sx1250_rx_fault();
@@ -57,14 +61,23 @@ static int restore(uint32_t frequency_hz) {
     return 0;
 }
 
+#ifdef SX1250_WARM_SIMULATION
+static int64_t now_ns(void);
+#include "tests/sx1250_tx_warm_impl.h"
+#endif
+
 static int prepare_rf0(const struct sx1250_rx_config *c, uint8_t length, uint8_t packet_pin_mode) {
     uint32_t frf = SX1250_FREQ_TO_REG(c->frequency_hz);
     uint8_t f[] = {frf >> 24, frf >> 16, frf >> 8, frf}, actual[4], bridge, clamp, quality;
     if (pa_off() || lnas(0) ||
         line(SX1302_REG_COMMON_CTRL0_CLK32_RIF_CTRL, 0) ||
+#ifdef SX1250_WARM_SIMULATION
+        leave_bridge_sim(packet_pin_mode) ||
+#else
         sx1302_radio_reset(tx_radio, LGW_RADIO_TYPE_SX1250) ||
         sx1302_radio_set_mode(tx_radio, LGW_RADIO_TYPE_SX1250) ||
         bank_write(tx_radio, SET_STANDBY, (uint8_t[]){STDBY_RC}, 1, 2) ||
+#endif
         bank_read(tx_radio, READ_REGISTER, (uint8_t[]){5, 0x87}, 2, &bridge, 1) ||
         bridge != packet_pin_mode || /* Compare with the working RF1 packet engine. */
         bank_write(tx_radio, CALIBRATE, (uint8_t[]){0x7f}, 1, 2) ||
@@ -133,7 +146,12 @@ static int transmit(unsigned timeout_ms) {
     }
 }
 
+#ifdef SX1250_WARM_SIMULATION
+int sx1250_tx_send_warm_sim(const uint8_t *payload, size_t length, unsigned timeout_ms) {
+    if (!fake_warm_simulation_active() || !reset_captured) { errno = EPERM; return -1; }
+#else
 int sx1250_tx_send(const uint8_t *payload, size_t length, unsigned timeout_ms) {
+#endif
     const struct sx1250_rx_config *c = sx1250_rx_profile();
     if (!c) return -1;
     if (!payload || !length || length > 255 || !timeout_ms || timeout_ms > 120000 ||
@@ -153,7 +171,23 @@ int sx1250_tx_send(const uint8_t *payload, size_t length, unsigned timeout_ms) {
     if ((flags[0] & 2) || (flags[1] & 0x62)) { errno = EAGAIN; return -1; }
     int err = EIO;
     if (!prepare_rf0(c, length, packet_pin_mode) && !fill_fifo(payload, length)) err = transmit(timeout_ms);
+#ifdef SX1250_WARM_SIMULATION
+    /* A successful TxDone permits verified warm recovery. Any other result
+     * goes directly to one cold recovery; an ambiguous TX is never resent. */
+    if (err || restore_bridge_sim(c->frequency_hz)) {
+        /* Warm recovery might already have reached RF1 SetRx. Cold recovery
+         * expects RF1 in standby, including if this confirmation fails. */
+        int standby = write_cmd(SET_STANDBY, (uint8_t[]){STDBY_XOSC}, 1, 3);
+        if (restore(c->frequency_hz) || standby) {
+            pa_off();
+            lnas(0);
+            sx1250_rx_fault();
+            err = EIO;
+        }
+    }
+#else
     if (restore(c->frequency_hz)) err = EIO;
+#endif
     if (err) { errno = err; return -1; }
     return 0;
 }

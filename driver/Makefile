@@ -28,3 +28,8 @@ check: libsx1250_rx.a libsx1250_tx.a libsx1250_fake_hal.a
 clean:
 	$(RM) $(OBJS) sx1250-rx.o sx1250_tx.o tests/fake_hal.o libsx1250_rx.a libsx1250_tx.a libsx1250_fake_hal.a sx1250-rx gfsk_rx
 .PHONY: all check clean
+
+# Offline comparison: the benchmark links register models and no physical SPI ioctl.
+.PHONY: bench-handover bench-handover-wall
+bench-handover bench-handover-wall:
+	CC="$(CC)" python3 tests/bench_handover.py --hal "$(abspath $(HAL))" $(if $(filter bench-handover-wall,$@),--wall-clock)
