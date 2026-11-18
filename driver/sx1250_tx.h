@@ -12,7 +12,8 @@ extern "C" {
  * timeout_ms (1..120000) limits SetTx airtime/wait, in addition to the HAL's
  * bounded reset/setup/recovery delays. Length is 1..255, or the exact implicit
  * length. Returns 0 only for TxDone followed by successful RF1 rearming.
- * EAGAIN: RX event pending, service sx1250_rx_next() before trying again.
+ * EAGAIN: RF0 did not start. Keep the TX queued, service sx1250_rx_next(),
+ * and retry after sx1250_rx_activity() reports idle.
  * After other I/O failures transmission may already have occurred; do not retry
  * blindly. If RX recovery failed, close and reset the board before reopening.
  * No driver-level listen-before-talk or airtime accounting is performed. */

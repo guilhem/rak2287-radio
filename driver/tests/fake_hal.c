@@ -14,7 +14,7 @@
 #include "loragw_sx1302.h"
 
 static bool connected;
-static unsigned mode, packet_type, irq, arms;
+static unsigned mode, packet_type, irq, arms, irq_mask;
 static uint8_t regs[65536], tag, configured_cr, rf1_mod[4], rf1_packet[6];
 
 static int32_t lines[LGW_TOTALREGS];
@@ -68,16 +68,22 @@ size_t fake_last_tx(uint8_t *data, size_t capacity) {
     return sent_size;
 }
 
+bool fake_rx_progress(uint16_t flags) {
+    if (!connected || mode != 5 || !flags || (flags & ~0x1cu)) return false;
+    irq |= flags & irq_mask;
+    return true;
+}
+
 bool fake_air(uint8_t payload_tag, unsigned flags) {
     if (mode != 5) return false;
     tag = payload_tag;
-    irq = flags;
+    irq |= flags & irq_mask;
     mode = 2;
     return true;
 }
 
 bool fake_inject_rx(const uint8_t *data, uint8_t size) {
-    if (!getenv("FAKE_TX") || !data || !size || !fake_air(0, 0x12)) return false;
+    if (!getenv("FAKE_TX") || !data || !size || !fake_air(0, rf1_packet[2] ? 0x02 : 0x12)) return false;
     memcpy(injected, data, size);
     injected_size = size;
     return true;
@@ -237,6 +243,7 @@ int sx1250_reg_w(sx1250_op_code_t op, uint8_t *p, uint16_t n, uint8_t c) {
     assert(c == 1 && n);
     switch (op) {
     case SET_STANDBY:
+        if (mode == 5 && getenv("FAKE_RX_DONE_ON_STANDBY")) assert(fake_air(7, 0x12));
         if (irq && arms == 1 && !getenv("EARLY") && !getenv("FAKE_TX")) irq |= 0x40; /* CRC error becomes visible on freeze. */
         mode = 2 + p[0]; break;
     case CALIBRATE: assert(mode == 2); break;
@@ -246,7 +253,15 @@ int sx1250_reg_w(sx1250_op_code_t op, uint8_t *p, uint16_t n, uint8_t c) {
     case SET_RF_FREQUENCY: memcpy(regs + 0x088b, p, 4); break;
     case SET_PACKET_TYPE: packet_type = p[0]; break;
     case WRITE_REGISTER: memcpy(regs + ((p[0] << 8) | p[1]), p + 2, n - 2); break;
-    case CLR_IRQ_STATUS: irq = 0; break;
+    case CLR_IRQ_STATUS: {
+        assert(n == 2);
+        unsigned mask = (p[0] << 8) | p[1];
+        if (mask == 4 && getenv("FAKE_RX_DONE_ON_CLEAR")) assert(fake_air(7, 0x12));
+        if (mask == 4 && getenv("FAKE_RX_CLEAR_ERROR")) return -1;
+        irq &= ~mask;
+        if (mask == 4 && getenv("FAKE_RX_STUCK_PREAMBLE")) irq |= 4;
+        break;
+    }
     case SET_RX:
         assert(n == 3 && !p[0] && !p[1] && !p[2]);
         if (restoring && fault("rearm")) return -1;
@@ -269,7 +284,10 @@ int sx1250_reg_w(sx1250_op_code_t op, uint8_t *p, uint16_t n, uint8_t c) {
         if (getenv("IMPLICIT")) assert(p[2] == 1 && p[3] == 7 && p[4] == 1);
         if (getenv("ALT_PROFILE")) assert(n == 6 && !p[0] && p[1]==12 && !p[2] && p[3]==255 && !p[4] && p[5]);
         break;
-    case SET_BUFFER_BASE_ADDRESS: case SET_DIO_IRQ_PARAMS: break;
+    case SET_DIO_IRQ_PARAMS:
+        assert(n == 8);
+        irq_mask = (p[0] << 8) | p[1]; break;
+    case SET_BUFFER_BASE_ADDRESS: break;
     default: assert(!"unexpected radio write opcode");
     }
     return 0;
@@ -289,8 +307,8 @@ int sx1250_reg_r(sx1250_op_code_t op, uint8_t *p, uint16_t n, uint8_t c) {
         unsigned addr = (p[0] << 8) | p[1];
         if (getenv("IMPLICIT")) assert(addr != 0x0749 && addr != 0x076b);
         if (addr == 0x0702) {
-            assert(getenv("IMPLICIT") && n == 4);
-            regs[0x0702] = arms == 2 ? 8 : 7;
+            assert(rf1_packet[2] && n == 4);
+            regs[0x0702] = getenv("IMPLICIT") ? (arms == 2 ? 8 : 7) : rf1_packet[3];
         }
         /* Synthetic RX API vectors use CR4/6; injected frames use the RF1 profile. */
         regs[0x0749] = injected_size ? configured_cr << 4 : 0x20;
@@ -298,6 +316,8 @@ int sx1250_reg_r(sx1250_op_code_t op, uint8_t *p, uint16_t n, uint8_t c) {
         p[2] = status; memcpy(p + 3, regs + addr, n - 3); break;
     }
     case GET_IRQ_STATUS:
+        if (getenv("FAKE_RX_IRQ_ERROR")) return -1;
+        if (getenv("FAKE_RX_IRQ_STATUS")) status = strtoul(getenv("FAKE_RX_IRQ_STATUS"), NULL, 0);
         if (mode == 5 && arms <= 3 && !getenv("IDLE")) fake_air(0, 0x12);
         p[0] = status; p[1] = irq >> 8; p[2] = irq; break;
     case GET_RX_BUFFER_STATUS: p[0] = status; p[1] = getenv("IMPLICIT") ? (arms == 2 ? 7 : 193) : injected_size ? injected_size : 255; p[2] = 230; break;

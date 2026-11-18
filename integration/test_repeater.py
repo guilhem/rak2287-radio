@@ -60,7 +60,7 @@ class RepeaterTest(unittest.TestCase):
         result = self.invoke(INJECT_BEFORE_TX="1")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn("received=4 flood=4 direct=0 flood_dups=2 direct_dups=0 "
-                      "rejected=0 sent=2 flood_tx=2 direct_tx=0 busy_drops=0", result.stdout)
+                      "rejected=0 sent=2 flood_tx=2 direct_tx=0 busy_deferrals=1", result.stdout)
 
     def test_ambiguous_transmit_failure_stops_and_releases_board(self):
         for fault in ("conflict", "rearm"):
@@ -70,6 +70,43 @@ class RepeaterTest(unittest.TestCase):
                 self.assertIn("sx1250_tx_send", result.stderr)
                 self.assertIn("HAL disconnected", result.stdout)
                 self.assertIn("sent=0 flood_tx=0", result.stdout)
+
+    def test_dispatcher_activity(self):
+        for scenario in ("idle", "complete", "terminal", "crc", "reject", "lost", "race", "force"):
+            with self.subTest(scenario=scenario):
+                result = self.invoke(ACTIVITY_SCENARIO=scenario)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                stats = next(line for line in result.stdout.splitlines() if line.startswith("SUMMARY "))
+                stats = dict(word.split("=") for word in stats.split()[1:])
+                order = re.search(r"AIR ordered busy=(\d+) veto=(\d+) handled=(\d+) attempts=(\d+) elapsed=(\d+)",
+                                  result.stdout)
+                self.assertIsNotNone(order, result.stdout)
+                busy, veto, handled, attempts, elapsed = map(int, order.groups())
+                self.assertEqual(stats["sent"], "1")
+                self.assertEqual(stats["flood_tx"], "1")
+                self.assertEqual(stats["rejected"], "1" if scenario == "reject" else "0")
+                self.assertEqual(int(stats["busy_deferrals"]), veto)
+                self.assertEqual(veto, int(scenario in ("race", "force")))
+                self.assertEqual(attempts, 1 + veto)
+                self.assertEqual(handled, int(scenario not in ("idle", "lost")))
+                self.assertEqual(busy > 0, scenario not in ("idle", "race"))
+                if scenario in ("complete", "terminal", "race", "force"):
+                    self.assertGreaterEqual(int(stats["direct"]), 1)
+                if scenario in ("crc", "reject", "idle", "lost"):
+                    self.assertEqual(stats["received"], "1")
+                    self.assertEqual(stats["direct"], "0")
+                if scenario == "lost":
+                    self.assertGreaterEqual(elapsed, 163)
+                    self.assertLess(elapsed, 3000)
+                if scenario == "force":
+                    self.assertGreaterEqual(elapsed, 4000)
+
+    def test_activity_io_error_aborts_before_tx(self):
+        result = self.invoke(ACTIVITY_SCENARIO="error")
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertIn("sx1250_rx_activity", result.stderr)
+        self.assertIn("HAL disconnected", result.stdout)
+        self.assertIn("sent=0 flood_tx=0", result.stdout)
 
     def test_opt_in_required_and_corrupt_identity_preserved(self):
         result = self.invoke([BINARY, "--device", self.device])

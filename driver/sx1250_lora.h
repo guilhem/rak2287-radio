@@ -19,11 +19,14 @@ static inline int bw_code(uint32_t hz) {
     }
 }
 
+static inline bool lora_ldro(const struct sx1250_rx_config *c) {
+    return (1u << c->spreading_factor) * 1000u >= 16u * c->bandwidth_hz;
+}
+
 static inline int configure_phy(unsigned rf, const struct sx1250_rx_config *c, uint8_t payload_length) {
     uint8_t iq, check[2], type;
     uint8_t sync[] = {0x07, 0x40, (c->sync_word & 0xf0) | 4, (c->sync_word << 4) | 4};
-    bool ldro = ((1u << c->spreading_factor) * 1000u >= 16u * c->bandwidth_hz);
-    uint8_t mod[] = {c->spreading_factor, bw_code(c->bandwidth_hz), c->coding_rate - 4, ldro};
+    uint8_t mod[] = {c->spreading_factor, bw_code(c->bandwidth_hz), c->coding_rate - 4, lora_ldro(c)};
     uint8_t pkt[] = {c->preamble_symbols >> 8, c->preamble_symbols, c->implicit_length != 0,
                      payload_length, c->require_crc, c->inverted_iq};
     return bank_write(rf, SET_PACKET_TYPE, (uint8_t[]){PACKET_TYPE_LORA}, 1, 3) ||

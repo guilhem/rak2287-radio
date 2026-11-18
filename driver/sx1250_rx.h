@@ -38,6 +38,16 @@ int sx1250_rx_open(const char *spi_path, const struct sx1250_rx_config *config);
  * One reception latches the FIFO until next() reads and rearms the radio.
  * Arrivals during that interval can be missed when the caller polls slowly. */
 int sx1250_rx_next(struct sx1250_rx_packet *packet, int timeout_ms);
+/* Return 1 while RF1 reports a LoRa preamble, an explicit header, or a terminal
+ * event awaiting next(). Return 0 if no such activity is observed, -1/errno on
+ * error. No FIFO consumption, standby or CAD. Poll next() to drain terminals.
+ * The local deadline starts when activity() first observes a partial IRQ.
+ * A previously latched indication can therefore defer TX for a full window
+ * on that first call. Its radio arrival time is unknown. The preamble budget
+ * assumes a sender using the configured preamble length.
+ * Unrelated energy, activity in another PHY, and arrivals after the sample may
+ * go undetected. In implicit mode only the preamble predicts a pending frame. */
+int sx1250_rx_activity(void);
 int sx1250_rx_close(void);
 #ifdef __cplusplus
 }

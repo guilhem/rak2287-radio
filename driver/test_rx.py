@@ -20,6 +20,10 @@ with tempfile.TemporaryDirectory() as scratch:
     subprocess.run([cc, *flags, "tests/tx.c", "libsx1250_tx.a", "libsx1250_rx.a",
                     "libsx1250_fake_hal.a", "-o", tmp / "tx"], cwd=here, check=True)
     subprocess.run([tmp / "tx", radio], check=True, timeout=5)
+    subprocess.run([cc, *flags, "tests/activity.c", "libsx1250_tx.a", "libsx1250_rx.a",
+                    "libsx1250_fake_hal.a", "-Wl,--wrap=clock_gettime", "-o", tmp / "activity"],
+                   cwd=here, check=True)
+    subprocess.run([tmp / "activity", radio], check=True, timeout=3)
     cxx = os.environ.get("CXX", "c++")
     subprocess.run([cxx, "-std=c++11", "-Wall", "-Wextra", "-Werror", "-I.", "tests/cpp_link.cc",
                     "libsx1250_tx.a", "libsx1250_rx.a", hal / "libloragw/libloragw.a", hal / "libtools/libtinymt32.a",

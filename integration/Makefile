@@ -66,10 +66,16 @@ $(RADIO_OBJECTS) $(BUILD)/fake_hal.o $(BUILD)/radio_scenario.o: | $(BUILD)
 $(BUILD)/meshcore-radio-repeater: $(REPEATER_OBJECTS) $(RADIO_OBJECTS) $(HAL_LIBS)
 	$(CXX) $(LDFLAGS) -Wl,--gc-sections $^ -lrt -lm -o "$@"
 $(BUILD)/meshcore-sim-repeater: $(REPEATER_OBJECTS) $(RADIO_OBJECTS) $(BUILD)/fake_hal.o $(BUILD)/radio_scenario.o
-	$(CXX) $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=sx1250_rx_next,--wrap=sx1250_tx_send $^ -o "$@"
+	$(CXX) $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=sx1250_rx_next,--wrap=sx1250_rx_activity,--wrap=sx1250_tx_send $^ -o "$@"
 -include $(BUILD)/RepeaterCLI.d $(RADIO_OBJECTS:.o=.d) $(BUILD)/fake_hal.d $(BUILD)/radio_scenario.d
 
+$(BUILD)/repeater_queue_test.o: tests/repeater_queue_test.cpp repeater_queue.h | $(BUILD) check-revisions
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -UNDEBUG -c "$<" -o "$@"
+$(BUILD)/repeater-queue-test: $(BUILD)/repeater_queue_test.o $(BUILD)/StaticPoolPacketManager.o $(BUILD)/Packet.o
+	$(CXX) $(LDFLAGS) -Wl,--gc-sections $^ -o "$@"
+-include $(BUILD)/repeater_queue_test.d
 .PHONY: check
-check: $(BUILD)/meshcore-rx-monitor simulated-repeater
+check: $(BUILD)/repeater-queue-test $(BUILD)/meshcore-rx-monitor simulated-repeater
+	"$(BUILD)/repeater-queue-test"
 	python3 -B test_monitor.py "$(BUILD)/meshcore-rx-monitor"
 	python3 -B test_repeater.py "$(BUILD)/meshcore-sim-repeater"

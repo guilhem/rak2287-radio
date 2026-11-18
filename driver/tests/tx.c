@@ -50,6 +50,7 @@ int main(int argc, char **argv) {
         assert(!sx1250_rx_open(argv[1], &c));
         assert(sx1250_tx_send(payload, 1, 100) < 0 && errno == EIO);
         assert(fake_last_tx(out, sizeof out) == 1 && out[0] == payload[0]);
+        assert(sx1250_rx_activity() < 0 && errno == EIO);
         assert(sx1250_rx_next(&packet, 0) < 0 && errno == EIO);
         assert(sx1250_tx_send(payload, 1, 100) < 0 && errno == EIO);
         assert(!sx1250_rx_close());

@@ -11,7 +11,16 @@ static const bool radio_verbose = false;
 
 static bool active, failed;
 static struct sx1250_rx_config profile;
+/* IRQ bits remain latched until acknowledged. Repeated samples of the same
+ * phase must never extend its budget. A header stays latched for next(). */
+static struct {
+    int64_t deadline;
+    unsigned ignored;
+    bool payload, repeated_preamble;
+} activity;
+
 static int arm(void) {
+    memset(&activity, 0, sizeof activity);
     uint8_t flags[2], status = 0;
     if (write_cmd(CLR_IRQ_STATUS, (uint8_t[]){0xff, 0xff}, 2, 3) ||
         read_cmd(GET_IRQ_STATUS, NULL, 0, flags, 2) || flags[0] || flags[1] ||
@@ -44,10 +53,22 @@ int sx1250_rx_open(const char *path, const struct sx1250_rx_config *c) {
     return 0;
 }
 
+static int receive_irq(unsigned *irq) {
+    uint8_t raw[3] = {0}; /* GET_IRQ_STATUS: command status then two IRQ bytes. */
+    if (sx1250_reg_r(GET_IRQ_STATUS, raw, sizeof raw, chain)) return -1;
+    unsigned mode = (raw[0] >> 4) & 7, code = (raw[0] >> 1) & 7;
+    *irq = (raw[1] << 8) | raw[2];
+    bool standby = mode == 2 || mode == 3;
+    /* A hardware timeout may set the previous-command status to timeout.
+     * It requires an independently latched terminal bit and a stopped modem. */
+    if (standby && code == 3 && (*irq & rx_timeout)) return 0;
+    if (!status_ok(raw[0])) return -1;
+    return mode == 5 || (standby && (*irq & (rx_done | crc_error | header_error | rx_timeout))) ? 0 : -1;
+}
+
 static int poll_packet(struct sx1250_rx_packet *out) {
-    uint8_t flags[2];
-    if (read_cmd(GET_IRQ_STATUS, NULL, 0, flags, 2)) return -1;
-    unsigned irq = (flags[0] << 8) | flags[1];
+    unsigned irq;
+    if (receive_irq(&irq)) return -1;
     if (!(irq & (rx_done | crc_error | header_error | rx_timeout))) return 0;
     if (freeze_rx_irq(&irq)) return -1;
     bool valid = (irq & rx_done) && !(irq & (header_error | crc_error | rx_timeout)) &&
@@ -67,6 +88,71 @@ static int poll_packet(struct sx1250_rx_packet *out) {
 const struct sx1250_rx_config *sx1250_rx_profile(void) {
     if (!active || failed) { errno = active ? EIO : ENODEV; return NULL; }
     return &profile;
+}
+
+/* Conservative symbol bound derived from Semtech's LoRa time-on-air formula.
+ * 24 symbols cover the preamble tail (up to 6.25), header and timing margin.
+ * Explicit headers can announce up to 255 bytes, CR 4/8 and a payload CRC.
+ * Use 64-bit arithmetic even for SF12/BW7.8 and a 65535-symbol preamble. */
+static int64_t activity_budget_ns(bool payload, bool include_preamble) {
+    const bool fixed = profile.implicit_length != 0;
+    unsigned symbols = 24 + (include_preamble ? profile.preamble_symbols : 0);
+    if (fixed || payload) {
+        unsigned sf = profile.spreading_factor;
+        int bits = 8 * (fixed ? profile.implicit_length : 255) +
+                   (!fixed || profile.require_crc ? 16 : 0) + (fixed ? 0 : 20) +
+                   (sf >= 7 ? 8 : 0) - 4 * (int)sf;
+        unsigned block = 4 * (sf - 2 * lora_ldro(&profile));
+        if (bits > 0)
+            symbols += (((unsigned)bits + block - 1) / block) * (fixed ? profile.coding_rate : 8);
+    }
+    uint64_t chips = (uint64_t)symbols << profile.spreading_factor;
+    return (chips * UINT64_C(1000000000) + profile.bandwidth_hz - 1) / profile.bandwidth_hz;
+}
+
+int sx1250_rx_activity(void) {
+    if (!sx1250_rx_profile()) return -1;
+    bool acknowledged_preamble = false;
+    for (;;) {
+        unsigned irq;
+        if (receive_irq(&irq)) { errno = EIO; return -1; }
+        if (irq & (rx_done | header_error | crc_error | rx_timeout)) return 1;
+        /* SX1261/2 table 8-4 reserves SyncWordValid for FSK. An implicit
+         * LoRa frame has no transmitted header. */
+        unsigned phase = irq & (preamble_detected | (profile.implicit_length ? 0 : header_valid));
+        activity.ignored &= phase;
+        if (!(phase & preamble_detected)) activity.repeated_preamble = false;
+        else if (acknowledged_preamble && !activity.repeated_preamble) {
+            /* Immediate reassertion may be a new detection or a stuck bit.
+             * Allow one more window until an actual low level is observed. */
+            activity.ignored &= ~preamble_detected;
+            activity.repeated_preamble = true;
+        }
+        if (!(phase & ~activity.ignored)) return 0;
+        struct timespec t;
+        if (clock_gettime(CLOCK_MONOTONIC, &t)) return -1;
+        int64_t now = (int64_t)t.tv_sec * INT64_C(1000000000) + t.tv_nsec;
+        /* A new preamble with a previous expired header still latched needs
+         * a full packet window: another header has no observable rising edge. */
+        bool payload = (phase & header_valid) != 0;
+        if (!activity.deadline || (payload && !activity.payload)) {
+            activity.payload = payload;
+            activity.deadline = now + activity_budget_ns(payload, !payload || (activity.ignored & header_valid));
+        }
+        if (now < activity.deadline) return 1;
+
+        /* W1C only the preamble. RxDone or HeaderValid can latch between the
+         * sample and this command, including while the radio enters standby. */
+        if ((phase & preamble_detected) &&
+            write_cmd(CLR_IRQ_STATUS, (uint8_t[]){0, preamble_detected}, 2, 0)) {
+            errno = EIO;
+            return -1;
+        }
+        acknowledged_preamble = (phase & preamble_detected) != 0;
+        activity.ignored |= phase;
+        activity.deadline = 0;
+        /* Sample again to pick up concurrent progress and note deasserted bits. */
+    }
 }
 
 int sx1250_rx_rearm(void) { return arm(); }

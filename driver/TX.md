@@ -10,7 +10,11 @@ make HAL=/path/to/sx1302_hal libsx1250_rx.a libsx1250_tx.a
 
 Include `sx1250_tx.h` and link `libsx1250_tx.a`, then `libsx1250_rx.a`, then the stock Semtech HAL and its dependencies. After opening a LoRa RX profile, call `sx1250_tx_send(payload, length, timeout_ms)`. Supply the complete PHY bytes. The existing frequency, SF, bandwidth, coding rate, sync word, preamble, CRC and IQ polarity apply to the transmission. An implicit-header frame must use the configured fixed length. Choose a timeout long enough for the selected PHY and payload. The application owns airtime accounting and channel access.
 
-Only a return value of zero confirms that the driver observed RF0 TxDone and rearmed RF1. On `EAGAIN`, read the pending RF1 event using `sx1250_rx_next()` before attempting to send again. While RF0 transmits, RF1 is unavailable. An in-progress preamble can be interrupted when switching to TX. An I/O error during a send can follow an actual transmission. If the receiver also returns `EIO`, close it, reset the board and reopen it. The timeout bounds the RF transmission and its IRQ wait. Board reset, setup and recovery require additional time.
+Call `sx1250_rx_activity()` before scheduling a transmission. A return of 1 means RF1 has detected a LoRa preamble, accepted an explicit header, or latched a terminal event for `sx1250_rx_next()`. Keep the outgoing packet queued and continue polling the receiver. A return of 0 permits a send attempt. A negative result reports an error through `errno`. The detector uses the configured LoRa profile. Other signals on the channel may go undetected.
+
+The send call samples RF1 again immediately before putting it in standby. On `EAGAIN`, RF0 has not started. Service `sx1250_rx_next()` and retry the queued packet once activity clears. If a new preamble appears between the final SPI sample and the standby command, the handover can still interrupt it. A completed packet latched during that interval remains available to read.
+
+Success confirms that RF0 reported TxDone and RF1 was rearmed. An I/O error can follow an actual transmission. If the receiver also returns `EIO`, close it, reset the board and reopen it. The timeout bounds the RF transmission and its IRQ wait. Board reset, setup and recovery require additional time.
 
 RF0 first leaves the concentrator's I/Q mode while the radio interface uses its SPI clock. The driver keeps both external PA enables low and disables both LNAs during this transaction. For RF0 it uses the SX1262 reduced-output PA settings `02 02 00 01` and a signed SetTxParams value of `-9`. These values do not determine the power at the antenna connector. The stock EU868 reference table uses an external-PA bypass at its low settings. Before configuring RF0, the driver checks that its post-reset pin-mode register matches the working RF1 packet engine. The bypass path and power need independent confirmation on the specific board. Before enabling real TX, attach an appropriate load or antenna. [Semtech SX1261/SX1262 datasheet](https://www.semtech.com/products/wireless-rf/lora-connect/sx1262) · [Semtech EU868 reference gain table](https://github.com/Lora-net/sx1302_hal/blob/4b42025d1751e04632c0b04160e0d29dbbb222a5/packet_forwarder/global_conf.json.sx1250.EU868)
 
@@ -33,13 +37,13 @@ For a 32-byte EU Narrow transmission (869.618 MHz, SF8, 62.5 kHz, CR 4/8), the d
 
 | Interval | Two resets | No-reset candidate |
 | --- | ---: | ---: |
-| API entry to RF1 standby | 2 | 2 |
+| API entry to RF1 standby | 3 | 3 |
 | RF1 standby to RF0 SetTx | 619 | 131 |
 | RF0 SetTx to observed TxDone | 411 | 411 |
 | Observed TxDone to RF1 SetRx | 574 | 96 |
 | **RF1 unavailable** | **1,604** | **638** |
 | Additional verification before the API returns | 11 | 11 |
-| Total time in the send call | 1,617 | 651 |
+| Total time in the send call | 1,618 | 652 |
 
 The modeled packet takes 410.624 ms on air. Most of the 966 ms saved comes from removing two 520 ms reset sequences. Extra register transfers consume some of that saving. The measured handover excludes the board-opening reset and the candidate's one-time register capture.
 

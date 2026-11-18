@@ -164,6 +164,12 @@ int sx1250_tx_send(const uint8_t *payload, size_t length, unsigned timeout_ms) {
         errno = EIO;
         return -1;
     }
+    /* Last live sample before stopping RF1. A preamble starting between
+     * this sample and standby can still be cut short. The frozen IRQ read
+     * below protects a terminal/FIFO that latched in that interval. */
+    int busy = sx1250_rx_activity();
+    if (busy < 0) return -1;
+    if (busy) { errno = EAGAIN; return -1; }
     if (write_cmd(SET_STANDBY, (uint8_t[]){STDBY_XOSC}, 1, 3) ||
         read_cmd(GET_IRQ_STATUS, NULL, 0, flags, 2)) {
         sx1250_rx_fault(); errno = EIO; return -1;

@@ -2,7 +2,7 @@
 #ifndef SX1250_PACKET_H
 #define SX1250_PACKET_H
 #include "sx1250_rx.h"
-enum { rx_done = 2, header_valid = 0x10, header_error = 0x20, crc_error = 0x40, rx_timeout = 0x200 };
+enum { rx_done = 2, preamble_detected = 4, header_valid = 0x10, header_error = 0x20, crc_error = 0x40, rx_timeout = 0x200 };
 
 static inline int freeze_rx_irq(unsigned *irq) {
     const unsigned terminal = header_error | crc_error | rx_done | rx_timeout;
