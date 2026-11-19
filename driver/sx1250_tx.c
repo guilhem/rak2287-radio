@@ -7,6 +7,7 @@
 #include "loragw_reg.h"
 #include "loragw_sx1302.h"
 #include "sx1250_board.h"
+#include "sx1250_dual.h"
 #include "sx1250_rx_internal.h"
 #include "sx1250_tx.h"
 #include "sx1250_tx_handoff.h"
@@ -82,10 +83,31 @@ static bool clock_counter_running(void) {
 static int64_t now_ns(void);
 #include "sx1250_tx_warm_impl.h"
 
+static int configure_rf0_tx(const struct sx1250_rx_config *c, uint8_t length,
+                            struct sx1250_handoff_report *report) {
+    uint32_t frf = SX1250_FREQ_TO_REG(c->frequency_hz);
+    uint8_t f[] = {frf >> 24, frf >> 16, frf >> 8, frf}, actual[4], clamp, quality;
+    stage(report, "rf0-packet-configuration");
+    if (bank_write(tx_radio, SET_RF_FREQUENCY, f, sizeof f, 3) ||
+        bank_read(tx_radio, READ_REGISTER, (uint8_t[]){8, 0x8b}, 2, actual, sizeof actual) ||
+        memcmp(f, actual, sizeof actual) || configure_phy(tx_radio, c, length)) return -1;
+
+    /* SX1262 low-output PA table and errata 15.1 / 15.2. The SX1250 output
+     * stage and FEM bypass on this board have no autonomous-mode calibration. */
+    stage(report, "rf0-low-output-pa");
+    return bank_write(tx_radio, SET_PA_CONFIG, (uint8_t[]){2, 2, 0, 1}, 4, 3) ||
+           bank_write(tx_radio, SET_TX_PARAMS, (uint8_t[]){(uint8_t)-9, SET_RAMP_200U}, 2, 3) ||
+           bank_read(tx_radio, READ_REGISTER, (uint8_t[]){8, 0xd8}, 2, &clamp, 1) ||
+           bank_write(tx_radio, WRITE_REGISTER, (uint8_t[]){8, 0xd8, clamp | 0x1e}, 3, 3) ||
+           bank_read(tx_radio, READ_REGISTER, (uint8_t[]){8, 0x89}, 2, &quality, 1) ||
+           bank_write(tx_radio, WRITE_REGISTER, (uint8_t[]){8, 0x89,
+                      c->bandwidth_hz == 500000 ? quality & ~4 : quality | 4}, 3, 3) ||
+           bank_write(tx_radio, SET_DIO_IRQ_PARAMS, (uint8_t[]){2,1,0,0,0,0,0,0}, 8, 3);
+}
+
 static int prepare_rf0(const struct sx1250_rx_config *c, uint8_t length, uint8_t packet_pin_mode,
                        unsigned flags, struct sx1250_handoff_report *report) {
-    uint32_t frf = SX1250_FREQ_TO_REG(c->frequency_hz);
-    uint8_t f[] = {frf >> 24, frf >> 16, frf >> 8, frf}, actual[4], bridge, clamp, quality;
+    uint8_t bridge;
     stage(report, "rf0-spi-clock");
     if (pa_off() || lnas(0) || line(SX1302_REG_COMMON_CTRL0_CLK32_RIF_CTRL, 0)) return -1;
     if ((flags & (SX1250_HANDOFF_WARM_PREPARE | SX1250_HANDOFF_WARM_RESTORE)) &&
@@ -113,22 +135,8 @@ static int prepare_rf0(const struct sx1250_rx_config *c, uint8_t length, uint8_t
         bridge != packet_pin_mode || /* Compare with the working RF1 packet engine. */
         bank_write(tx_radio, CALIBRATE, (uint8_t[]){0x7f}, 1, 2) ||
         sx1250_calibrate(tx_radio, c->frequency_hz) ||
-        bank_write(tx_radio, SET_STANDBY, (uint8_t[]){STDBY_XOSC}, 1, 3) ||
-        bank_write(tx_radio, SET_RF_FREQUENCY, f, sizeof f, 3) ||
-        bank_read(tx_radio, READ_REGISTER, (uint8_t[]){8, 0x8b}, 2, actual, 4) ||
-        memcmp(f, actual, sizeof f) || configure_phy(tx_radio, c, length)) return -1;
-
-    /* SX1262 low-output PA table and errata 15.1 / 15.2. The SX1250 output
-     * stage and FEM bypass on this board have no autonomous-mode calibration. */
-    stage(report, "rf0-low-output-pa");
-    return bank_write(tx_radio, SET_PA_CONFIG, (uint8_t[]){2, 2, 0, 1}, 4, 3) ||
-           bank_write(tx_radio, SET_TX_PARAMS, (uint8_t[]){(uint8_t)-9, SET_RAMP_200U}, 2, 3) ||
-           bank_read(tx_radio, READ_REGISTER, (uint8_t[]){8, 0xd8}, 2, &clamp, 1) ||
-           bank_write(tx_radio, WRITE_REGISTER, (uint8_t[]){8, 0xd8, clamp | 0x1e}, 3, 3) ||
-           bank_read(tx_radio, READ_REGISTER, (uint8_t[]){8, 0x89}, 2, &quality, 1) ||
-           bank_write(tx_radio, WRITE_REGISTER, (uint8_t[]){8, 0x89,
-                      c->bandwidth_hz == 500000 ? quality & ~4 : quality | 4}, 3, 3) ||
-           bank_write(tx_radio, SET_DIO_IRQ_PARAMS, (uint8_t[]){2,1,0,0,0,0,0,0}, 8, 3);
+        bank_write(tx_radio, SET_STANDBY, (uint8_t[]){STDBY_XOSC}, 1, 3)) return -1;
+    return configure_rf0_tx(c, length, report);
 }
 
 static int fill_fifo(const uint8_t *data, size_t length) {
@@ -187,13 +195,27 @@ static int transmit(unsigned timeout_ms, struct sx1250_handoff_report *report) {
     }
 }
 
+static int load_and_send(const uint8_t *payload, size_t length, unsigned timeout_ms,
+                         bool dry_run, struct sx1250_handoff_report *report) {
+    stage(report, "rf0-fifo");
+    if (fill_fifo(payload, length)) return EIO;
+    stage(report, "rf0-pre-transmit-irq");
+    if (clear_tx_irqs()) return EIO;
+    return dry_run ? 0 : transmit(timeout_ms, report);
+}
+
+static bool valid_tx(const struct sx1250_rx_config *c, const uint8_t *payload,
+                     size_t length, unsigned timeout_ms) {
+    return payload && length && length <= 255 && timeout_ms && timeout_ms <= 120000 &&
+           (!c->implicit_length || length == c->implicit_length);
+}
+
 static int handoff(const uint8_t *payload, size_t length, unsigned timeout_ms, unsigned flags,
                    bool strict, struct sx1250_handoff_report *report) {
     stage(report, "validate");
     const struct sx1250_rx_config *c = sx1250_rx_profile();
     if (!c) return -1;
-    if (!payload || !length || length > 255 || !timeout_ms || timeout_ms > 120000 ||
-        (c->implicit_length && length != c->implicit_length)) { errno = EINVAL; return -1; }
+    if (!valid_tx(c, payload, length, timeout_ms)) { errno = EINVAL; return -1; }
 
     /* Preserve a completed RF1 frame; the caller drains it with next().
      * Standby prevents another reception between this check and the RF switch. */
@@ -225,18 +247,8 @@ static int handoff(const uint8_t *payload, size_t length, unsigned timeout_ms, u
         sx1250_rx_fault(); errno = EIO; return -1;
     }
     if ((irq[0] & 2) || (irq[1] & 0x62)) { errno = EAGAIN; return -1; }
-    int err = 0;
-    if (prepare_rf0(c, length, packet_pin_mode, flags, report)) {
-        err = EIO;
-    } else {
-        stage(report, "rf0-fifo");
-        if (fill_fifo(payload, length)) err = EIO;
-        else {
-            stage(report, "rf0-pre-transmit-irq");
-            if (clear_tx_irqs()) err = EIO;
-            else if (!(flags & SX1250_HANDOFF_DRY_RUN)) err = transmit(timeout_ms, report);
-        }
-    }
+    int err = prepare_rf0(c, length, packet_pin_mode, flags, report) ? EIO :
+        load_and_send(payload, length, timeout_ms, flags & SX1250_HANDOFF_DRY_RUN, report);
 
     int64_t set_rx_ns = -1;
     int64_t *stamp = report ? &set_rx_ns : NULL;
@@ -283,6 +295,58 @@ int sx1250_tx_send_report(const uint8_t *payload, size_t length, unsigned timeou
 
 int sx1250_tx_send(const uint8_t *payload, size_t length, unsigned timeout_ms) {
     return sx1250_tx_send_report(payload, length, timeout_ms, NULL);
+}
+
+int sx1250_dual_send(const struct sx1250_rx_config *profile, const uint8_t *payload, size_t length,
+                     unsigned timeout_ms, struct sx1250_handoff_report *report) {
+    if (report) *report = (struct sx1250_handoff_report){0};
+    stage(report, "validate");
+    if (!sx1250_lora_profile_valid(profile) || !valid_tx(profile, payload, length, timeout_ms)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    stage(report, "dual-pause");
+    int64_t pause_start = report ? now_ns() : -1;
+    if (sx1250_dual_pause()) return -1;
+
+    stage(report, "rf0-packet-snapshot");
+    uint8_t saved[SPANS(bridge_spans)][4];
+    bool saved_valid = !pa_off() && !lnas(0) &&
+        !snapshot(bridge_spans, SPANS(bridge_spans), saved);
+    /* Both banks are already in packet mode and calibrated for this EU band. */
+    int err = !saved_valid || configure_rf0_tx(profile, length, report) ? EIO :
+        load_and_send(payload, length, timeout_ms, false, report);
+
+    bool force_cold = false;
+    if (saved_valid) {
+        /* Explicitly abort on an uncertain SetTx or TxDone before touching RF0.
+         * Do not re-enable the LNAs until the dual receiver verifies standby. */
+        int cleanup = pa_off();
+        cleanup |= bank_write(tx_radio, SET_STANDBY, (uint8_t[]){STDBY_XOSC}, 1, 3) ||
+            write_snapshot(bridge_spans, SPANS(bridge_spans), saved, 3);
+        force_cold = cleanup != 0;
+        if (force_cold && !err) {
+            stage(report, "rf0-restore-packet-state");
+            err = EIO;
+        }
+    }
+    if (sx1250_dual_resume_report(force_cold, report ? &report->cold_recovery : NULL)) {
+        stage(report, "dual-resume");
+        errno = EIO;
+        return -1;
+    }
+
+    if (report) {
+        int64_t resumed_at = now_ns();
+        if (pause_start >= 0 && resumed_at >= pause_start)
+            report->downtime_ns = resumed_at - pause_start;
+        report->rf0_rearmed = true;
+        report->rf1_rearmed = true;
+        if (!err) report->failed_stage = report->cold_recovery ? "dual-warm-resume" : NULL;
+    }
+    if (err) { errno = err; return -1; }
+    return 0;
 }
 
 int sx1250_tx_probe_handoff(const uint8_t *payload, size_t length, unsigned timeout_ms,

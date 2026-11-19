@@ -1,6 +1,6 @@
 # RAK2287 radio
 
-Use the two SX1250 radios on a RAK2287 EU868 SPI concentrator from Linux. The C library receives LoRa packets on RF1. Its optional half-duplex transmit path sends a packet on RF0 and returns the board to RF1 reception. Applications supply their own packet bytes and radio profile. The MeshCore adapter is one such application.
+Use the two SX1250 radios on a RAK2287 EU868 SPI concentrator from Linux. The C library can receive LoRa packets on RF1 alone or listen on both radios with independent profiles. Its optional half-duplex transmit path sends a packet on RF0 and restores reception. Applications supply their own packet bytes and radio profiles. The MeshCore adapter is one such application.
 
 **A RAK2287 received and relayed MeshCore EU Narrow packets over the air at 62.5 kHz.** In a separate single-packet test, switching RF0 without per-packet resets reduced the RF1 receive gap from 1,649 ms to 687 ms. A second MeshCore node received the transmission. Antenna-port power and occupied spectrum remain unmeasured. [Hardware results](driver/TX.md)
 
@@ -22,6 +22,7 @@ The test feeds synthetic EU Narrow packets into a simulated RF1 FIFO. The MeshCo
 | --- | --- |
 | Receive packets from a physical board | `make receiver` builds the RX-only CLI. It writes payload bytes in hexadecimal plus RSSI and SNR to stdout. [Receiver guide](driver/README.md) |
 | Integrate your own application | Open a LoRa profile with `sx1250_rx_open()`. Use `sx1250_rx_next()` for reception. Link the optional transmit API to call `sx1250_tx_send()`. [RX API](driver/sx1250_rx.h) · [TX API and error handling](driver/sx1250_tx.h) |
+| Receive on two channels at once | Use `sx1250_dual_open()` and poll each RF chain. When an application sends through RF0, the driver checks both receivers for activity and restores both profiles after sending. [Dual-radio API](driver/sx1250_dual.h) · [Integration guide](driver/README.md#receive-on-both-radios) |
 | Observe MeshCore routing without transmitting | `make monitor` builds the stdin observer. It accepts packets from the RX-only CLI and reports forwarding decisions. [MeshCore adapter](integration/native-monitor.md) |
 | Share RF1 between two listening profiles | `make usp-rx monitor` builds the Semtech USP receiver and MeshCore observer. Set the LoRa parameters and listening durations in a profile file to observe MeshCore and Meshtastic in alternating slots. [Configurable receiver guide](integration/usp-receiver.md) |
 | Build the experimental RF0/RF1 MeshCore repeater | `make radio-repeater` builds the physical backend. Running it requires a separate transmit opt-in. The EU Narrow profile is 869.618 MHz, SF8, 62.5 kHz, CR 4/8 and private sync 0x12. [Repeater guide and validation](integration/radio-repeater.md) |

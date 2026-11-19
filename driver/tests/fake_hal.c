@@ -21,6 +21,7 @@ static int32_t lines[LGW_TOTALREGS];
 static unsigned tx_mode, tx_type, tx_irq, tx_size;
 static uint8_t tx_regs[65536], tx_fifo[256], sent[255], sent_size;
 static uint8_t injected[255], injected_size;
+static uint8_t rf0_rx[255], rf0_rx_size, rf0_rx_cr;
 static bool restoring, tx_started;
 static unsigned tx_commands;
 static bool injected_warm_fault;
@@ -90,8 +91,18 @@ bool fake_inject_rx(const uint8_t *data, uint8_t size) {
     return true;
 }
 
+bool fake_inject_rf0(const uint8_t *data, uint8_t size) {
+    if (!getenv("FAKE_DUAL_RX") || tx_mode != 5 || !data || !size) return false;
+    memcpy(rf0_rx, data, size);
+    rf0_rx_size = size;
+    tx_irq = 0x12;
+    tx_mode = 2;
+    return true;
+}
+
 static int tx_write(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
-    assert(getenv("FAKE_TX") && n && n <= 253);
+    bool dual_rx = getenv("FAKE_DUAL_RX") != NULL;
+    assert((getenv("FAKE_TX") || dual_rx) && n && n <= 253);
     switch (op) {
     case SET_STANDBY: tx_mode = 2 + p[0]; break;
     case CALIBRATE: assert(tx_mode == 2); break;
@@ -102,35 +113,56 @@ static int tx_write(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
         for (size_t i = 0; i < sizeof bench_bridge_fields / sizeof *bench_bridge_fields; ++i)
             assert(tx_regs[bench_bridge_fields[i].addr] == bench_bridge_fields[i].value);
         tx_mode = 5; break;
+#else
+    case SET_RX:
+        assert(dual_rx && n == 3 && !(p[0] || p[1] || p[2]));
+        assert(!lines[SX1302_REG_COMMON_CTRL0_CLK32_RIF_CTRL]);
+        assert(lines[SX1302_REG_AGC_MCU_RF_EN_A_LNA_EN] &&
+               lines[SX1302_REG_AGC_MCU_RF_EN_B_LNA_EN]);
+        tx_mode = 5; rf0_rx_size = 0; break;
 #endif
     case SET_RF_FREQUENCY: memcpy(tx_regs + 0x088b, p, 4); break;
     case SET_PACKET_TYPE: tx_type = p[0]; break;
-    case WRITE_REGISTER: memcpy(tx_regs + ((p[0] << 8) | p[1]), p + 2, n - 2); break;
-    case SET_MODULATION_PARAMS: assert(tx_mode == 3 && n == 4 && !memcmp(p, rf1_mod, 4)); break;
+    case WRITE_REGISTER: {
+        unsigned address = (p[0] << 8) | p[1];
+        if (dual_rx && address == 0x08e7 && tx_started && fault("dual_tx_trim_restore"))
+            return -1;
+        memcpy(tx_regs + address, p + 2, n - 2);
+        break;
+    }
+    case SET_MODULATION_PARAMS:
+        assert(tx_mode == 3 && n == 4);
+        if (dual_rx) rf0_rx_cr = p[2];
+        else assert(!memcmp(p, rf1_mod, 4));
+        break;
     case SET_PACKET_PARAMS:
-        assert(tx_mode == 3 && n == 6 && !memcmp(p, rf1_packet, 3) && !memcmp(p+4, rf1_packet+4, 2));
+        assert(tx_mode == 3 && n == 6);
+        assert(dual_rx || (!memcmp(p, rf1_packet, 3) && !memcmp(p+4, rf1_packet+4, 2)));
         tx_size = p[3]; break;
     case SET_PA_CONFIG:
         assert(n == 4 && p[0] == 2 && p[1] == 2 && !p[2] && p[3] == 1);
 #ifdef HANDOVER_BENCH
         tx_regs[0x08e7] = 0xa7; /* Synthetic OCP side effect, not a silicon value. */
+#else
+        if (dual_rx) tx_regs[0x08e7] = 0xa7;
 #endif
         break;
     case SET_TX_PARAMS: assert(n == 2 && (int8_t)p[0] == -9 && p[1] == SET_RAMP_200U); break;
     case SET_BUFFER_BASE_ADDRESS: case SET_DIO_IRQ_PARAMS: break;
-    case CLR_IRQ_STATUS: tx_irq = 0; break;
+    case CLR_IRQ_STATUS: tx_irq &= ~((p[0] << 8) | p[1]); break;
     case WRITE_BUFFER: assert((size_t)p[0] + n - 1 <= sizeof tx_fifo);
         memcpy(tx_fifo + p[0], p + 1, n - 1); break;
     case SET_TX:
-        assert(!getenv("FAKE_FORBID_TX"));
+        assert(!getenv("FAKE_FORBID_TX") && (!dual_rx || getenv("FAKE_DUAL_TX")));
         ++tx_commands;
         assert(!getenv("FAKE_SINGLE_TX") || tx_commands == 1);
         assert(n == 3 && (p[0] || p[1] || p[2]) && tx_mode == 3 && mode == 3 && tx_size);
         assert(!lines[SX1302_REG_AGC_MCU_RF_EN_A_LNA_EN] && !lines[SX1302_REG_AGC_MCU_RF_EN_B_LNA_EN]);
         assert(!lines[SX1302_REG_AGC_MCU_RF_EN_A_PA_EN] && !lines[SX1302_REG_AGC_MCU_RF_EN_B_PA_EN]);
         assert(!lines[SX1302_REG_COMMON_CTRL0_CLK32_RIF_CTRL] && tx_regs[0x0587] == regs[0x0587]);
-        assert(tx_type == PACKET_TYPE_LORA && !memcmp(tx_regs + 0x088b, regs + 0x088b, 4) &&
-               !memcmp(tx_regs + 0x0740, regs + 0x0740, 2));
+        assert(tx_type == PACKET_TYPE_LORA);
+        assert(dual_rx || (!memcmp(tx_regs + 0x088b, regs + 0x088b, 4) &&
+                          !memcmp(tx_regs + 0x0740, regs + 0x0740, 2)));
 #ifdef HANDOVER_BENCH
         for (size_t i = 0; i < sizeof bench_bridge_fields / sizeof *bench_bridge_fields; ++i)
             assert(tx_regs[bench_bridge_fields[i].addr] != bench_bridge_fields[i].value);
@@ -148,7 +180,8 @@ static int tx_write(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
 static int tx_read(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
     assert(n <= 253);
     /* The receive-only startup can snapshot the reset-state RF0 pins. */
-    assert(getenv("FAKE_TX") || (tx_mode == 2 && (op == GET_STATUS || op == READ_REGISTER)));
+    assert(getenv("FAKE_TX") || getenv("FAKE_DUAL_RX") ||
+           (tx_mode == 2 && (op == GET_STATUS || op == READ_REGISTER)));
     uint8_t status = 0x82 | (tx_mode << 4);
     if ((unsigned)op == 0x11) { p[0] = status; p[1] = tx_type; return 0; }
     switch (op) {
@@ -178,6 +211,10 @@ static int tx_read(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
         }
         break;
     case READ_REGISTER: { unsigned addr = (p[0] << 8) | p[1];
+        if (rf0_rx_size) {
+            tx_regs[0x0749] = rf0_rx_cr << 4;
+            tx_regs[0x076b] = 0x10;
+        }
         p[2] = status; memcpy(p + 3, tx_regs + addr, n - 3);
         if (addr == 0x0587 && tx_mode == 2 && tx_regs[addr] != 0x0b && fault("pinmode")) p[3] ^= 1;
         if (addr == 0x0587 && tx_mode == 5 && fault("warm_prepare") && !injected_warm_fault) {
@@ -186,9 +223,16 @@ static int tx_read(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
         }
         break; }
     case READ_BUFFER: { unsigned offset = p[0];
-        p[1] = status; memcpy(p + 2, tx_fifo + offset, n - 2);
+        p[1] = status;
+        memcpy(p + 2, (rf0_rx_size ? rf0_rx : tx_fifo) + offset, n - 2);
         if (fault("readback")) p[2] ^= 1;
         break; }
+    case GET_RX_BUFFER_STATUS:
+        assert(rf0_rx_size && n == 3);
+        p[0] = status; p[1] = rf0_rx_size; p[2] = 0; break;
+    case GET_PACKET_STATUS:
+        assert(rf0_rx_size && n == 4);
+        p[0] = status; p[1] = 161; p[2] = 249; p[3] = 0; break;
     default: assert(!"unexpected RF0 read");
     }
     return 0;
@@ -200,7 +244,7 @@ void *lgw_com_target(void) {
 }
 int lgw_connect(lgw_com_type_t t, const char *p) {
     assert(t == LGW_COM_SPI && p);
-    connected = true; regs[0x0587] = 0x20; arms = 0; irq = 0; sent_size = injected_size = 0;
+    connected = true; regs[0x0587] = 0x20; arms = 0; irq = 0; sent_size = injected_size = rf0_rx_size = 0;
     restoring = tx_started = false; memset(lines, 0, sizeof lines);
     tx_commands = 0;
     injected_warm_fault = false;
@@ -246,6 +290,7 @@ int sx1302_radio_host_ctrl(bool b) { (void)b; return 0; }
 int sx1302_radio_reset(uint8_t c, lgw_radio_type_t t) { assert(c <= 1 && t == LGW_RADIO_TYPE_SX1250);
     lines[SX1302_REG_COMMON_CTRL0_CLK32_RIF_CTRL] = 0;
     if (!c) { tx_mode = 2; tx_irq = 0; tx_type = PACKET_TYPE_GFSK;
+        if (getenv("FAKE_DUAL_RX")) tx_regs[0x08e7] = 0x5a;
         tx_regs[0x0587] = fault("pinmode") ? 0 : regs[0x0587]; restoring = tx_started; }
     return 0; }
 int sx1302_radio_set_mode(uint8_t c, lgw_radio_type_t t) { assert(c <= 1 && t == LGW_RADIO_TYPE_SX1250); return 0; }
@@ -260,7 +305,11 @@ int sx1302_radio_clock_select(uint8_t c) {
 int sx1302_pa_lna_lut_configure(struct lgw_conf_board_s *b) { assert(!b->full_duplex); return 0; }
 int sx1250_setup(uint8_t c, uint32_t f, bool single) { assert(!c && f && !single);
     tx_regs[0x0587] = 0x0b; tx_mode = 5; restoring = tx_started; return 0; }
-int sx1250_calibrate(uint8_t c, uint32_t f) { assert(f && ((c == 1 && mode == 2) || (!c && tx_mode == 2 && getenv("FAKE_TX")))); return 0; }
+int sx1250_calibrate(uint8_t c, uint32_t f) {
+    assert(f && ((c == 1 && mode == 2) ||
+                 (!c && tx_mode == 2 && (getenv("FAKE_TX") || getenv("FAKE_DUAL_RX")))));
+    return 0;
+}
 void wait_ms(unsigned long t) { (void)t; }
 #else
 #define sx1250_reg_w bench_radio_w
@@ -296,7 +345,7 @@ int sx1250_reg_w(sx1250_op_code_t op, uint8_t *p, uint16_t n, uint8_t c) {
         if (restoring && fault("rearm")) return -1;
         if (restoring) {
             assert(lines[SX1302_REG_AGC_MCU_RF_EN_A_LNA_EN] && lines[SX1302_REG_AGC_MCU_RF_EN_B_LNA_EN]);
-            assert(lines[SX1302_REG_COMMON_CTRL0_CLK32_RIF_CTRL]);
+            assert(lines[SX1302_REG_COMMON_CTRL0_CLK32_RIF_CTRL] == !getenv("FAKE_DUAL_RX"));
         }
         mode = 5; ++arms; injected_size = 0; restoring = tx_started = false;
         if (arms == 1 && getenv("EARLY")) assert(fake_air(7, 0x12));

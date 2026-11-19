@@ -4,7 +4,13 @@
 static const bool radio_verbose = false;
 #include "sx1250_io.h"
 
-const uint8_t sx1250_usp_rf1 = 1;
+const uint8_t sx1250_usp_radios[2] = {0, 1};
+
+static int radio_index(const void *context) {
+    if (context == &sx1250_usp_radios[0]) return 0;
+    if (context == &sx1250_usp_radios[1]) return 1;
+    return -1;
+}
 
 static bool rx_command(const uint8_t *command, uint16_t command_length, uint16_t data_length) {
     switch (command[0]) {
@@ -36,7 +42,8 @@ static bool rx_command(const uint8_t *command, uint16_t command_length, uint16_t
 
 sx126x_hal_status_t sx126x_hal_write(const void *context, const uint8_t *command,
                                     uint16_t command_length, const uint8_t *data, uint16_t data_length) {
-    if (context != &sx1250_usp_rf1 || !command || !command_length ||
+    int rf = radio_index(context);
+    if (rf < 0 || !command || !command_length ||
         (data_length && !data) || !rx_command(command, command_length, data_length))
         return SX126X_HAL_STATUS_ERROR;
     uint8_t frame[8];
@@ -47,15 +54,16 @@ sx126x_hal_status_t sx126x_hal_write(const void *context, const uint8_t *command
     /* Status immediately after SetRx may already report completed RX. The
      * caller checks that transition along with the latched IRQ. */
     if (opcode == SET_RX)
-        return sx1250_reg_w(opcode, frame, parameters, chain) ? SX126X_HAL_STATUS_ERROR : SX126X_HAL_STATUS_OK;
+        return sx1250_reg_w(opcode, frame, parameters, rf) ? SX126X_HAL_STATUS_ERROR : SX126X_HAL_STATUS_OK;
     unsigned mode = opcode == CLR_IRQ_STATUS ? 0 : 3;
-    return write_cmd(opcode, frame, parameters + data_length, mode) ?
+    return bank_write(rf, opcode, frame, parameters + data_length, mode) ?
            SX126X_HAL_STATUS_ERROR : SX126X_HAL_STATUS_OK;
 }
 
 sx126x_hal_status_t sx126x_hal_read(const void *context, const uint8_t *command,
                                    uint16_t command_length, uint8_t *data, uint16_t data_length) {
-    if (context != &sx1250_usp_rf1 || !command || command_length < 2 ||
+    int rf = radio_index(context);
+    if (rf < 0 || !command || command_length < 2 ||
         command[command_length - 1] != SX126X_NOP || !data || !data_length)
         return SX126X_HAL_STATUS_ERROR;
     switch (command[0]) {
@@ -77,7 +85,7 @@ sx126x_hal_status_t sx126x_hal_read(const void *context, const uint8_t *command,
     }
     /* USP appends its own NOP. bank_read inserts the same byte when it packs
      * the concentrator transaction, then checks its returned status. */
-    return read_cmd((sx1250_op_code_t)command[0], command + 1, command_length - 2, data, data_length) ?
+    return bank_read(rf, (sx1250_op_code_t)command[0], command + 1, command_length - 2, data, data_length) ?
            SX126X_HAL_STATUS_ERROR : SX126X_HAL_STATUS_OK;
 }
 

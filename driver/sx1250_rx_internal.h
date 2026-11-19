@@ -4,4 +4,6 @@
 const struct sx1250_rx_config *sx1250_rx_profile(void);
 int sx1250_rx_rearm_at(int64_t *set_rx_ns);
 void sx1250_rx_fault(void);
+/* Skip warm rearming when RF0's transmit registers could not be restored. */
+int sx1250_dual_resume_report(bool force_cold, bool *cold_recovery);
 #endif

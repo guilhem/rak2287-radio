@@ -27,7 +27,7 @@ int main(int argc, char **argv) {
     setenv("IDLE", "1", 1);
     setenv("FAKE_TX", "1", 1); /* Enables RX frame injection in the model. */
     assert(!sx1250_rx_open(argv[1], &narrow));
-    const void *radio = &sx1250_usp_rf1;
+    const void *radio = &sx1250_usp_radios[1];
     assert(sx126x_set_tx(radio, 1) != SX126X_STATUS_OK);
     assert(sx126x_set_tx_cw(radio) != SX126X_STATUS_OK);
     assert(sx126x_set_tx_infinite_preamble(radio) != SX126X_STATUS_OK);

@@ -14,7 +14,7 @@ libsx1250_tx.a: sx1250_tx.o
 	$(AR) rcs $@ $^
 libsx1250_fake_hal.a: tests/fake_hal.o
 	$(AR) rcs $@ $^
-sx1250_tx.o: sx1250_tx.h sx1250_tx_handoff.h sx1250_tx_warm_impl.h sx1250_board.h sx1250_io.h sx1250_lora.h sx1250_rx_internal.h sx1250_rx.h
+sx1250_tx.o: sx1250_tx.h sx1250_tx_handoff.h sx1250_tx_warm_impl.h sx1250_board.h sx1250_dual.h sx1250_io.h sx1250_lora.h sx1250_rx_internal.h sx1250_rx.h
 tests/fake_hal.o: tests/fake_hal.h
 libsx1250_rx.a: $(OBJS)
 	$(AR) rcs $@ $^
@@ -26,7 +26,7 @@ examples/tx_probe.o: sx1250_rx.h sx1250_tx.h sx1250_tx_handoff.h
 gfsk_rx: examples/gfsk_rx.c sx1250_board.o sx1250_io.h sx1250_packet.h sx1250_rx.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< sx1250_board.o $(HAL_LIBS) $(LDLIBS)
 $(OBJS): sx1250_io.h sx1250_board.h
-sx1250_rx.o: sx1250_packet.h sx1250_lora.h sx1250_rx_internal.h sx1250_usp.h
+sx1250_rx.o: sx1250_dual.h sx1250_packet.h sx1250_lora.h sx1250_rx_internal.h sx1250_usp.h
 sx1250_usp.o: sx1250_usp.h $(USP_RADIO)/sx126x_hal.h
 usp_sx126x.o: $(USP_RADIO)/sx126x.c $(USP_RADIO)/sx126x.h $(USP_RADIO)/sx126x_hal.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -ffunction-sections -fdata-sections -c -o $@ $<

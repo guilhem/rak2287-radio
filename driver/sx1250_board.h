@@ -15,6 +15,12 @@ extern "C" {
 int sx1250_board_acquire(const char *spi_path, uint32_t frequency_hz);
 int sx1250_board_release(void);
 
+/* Both chips start in packet-mode XOSC standby with the RIF on the SPI clock. */
+int sx1250_board_acquire_dual(const char *spi_path, const uint32_t frequency_hz[2]);
+int sx1250_board_recover_dual(const uint32_t frequency_hz[2]);
+/* After both radios are confirmed in standby, restore the verified RX front end. */
+int sx1250_board_enable_dual_rx(void);
+
 enum { SX1250_RF0_RESET_SPAN_COUNT = 6 };
 struct sx1250_reg_span { uint16_t address; uint8_t size; };
 extern const struct sx1250_reg_span sx1250_rf0_reset_spans[SX1250_RF0_RESET_SPAN_COUNT];

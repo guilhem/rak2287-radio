@@ -1,15 +1,15 @@
 # SX1250 packet radio for the RAK2287
 
-Read LoRa packets on Linux directly from the second radio of a RAK2287 EU868 SPI concentrator. An application gets the original packet bytes, RSSI and SNR through a C API or a command-line pipe. Choose the radio parameters for your own protocol. An optional transmit library sends on RF0 and resumes reception on RF1. A GFSK receive example uses the same board interface.
+Read LoRa packets on Linux directly from one or both radios of a RAK2287 EU868 SPI concentrator. An application gets the original packet bytes, RSSI and SNR through a C API. The command-line receiver listens on RF1. An optional transmit library sends on RF0 and restores reception. A GFSK receive example uses the same board interface.
 
-The tested board is a RAK2287 in a Raspberry Pi 4 hotspot. RF0 supplies the clock. RF1 demodulates packets and exposes its FIFO over the SX1302 SPI multiplexer. On this board RF1 received an SF8, 62.5 kHz packet whose 53 bytes exactly matched a simultaneous I/Q recording decoded on the host. The packet driver runs without loading custom concentrator firmware.
+The tested board is a RAK2287 in a Raspberry Pi 4 hotspot. In single-receiver mode, RF0 supplies the clock and RF1 exposes its demodulated packets through the SX1302 SPI multiplexer. On this board RF1 received an SF8, 62.5 kHz packet whose 53 bytes exactly matched a simultaneous I/Q recording decoded on the host. The packet driver runs without loading custom concentrator firmware.
 
 ## Receive a packet
 
 You need a Linux C toolchain, Make, Git for the initial checkout, Python 3 and a C++ compiler for the tests, and access to the concentrator SPI device. Build against the upstream Semtech V2.1.0 HAL. From this directory:
 
 ```sh
-git -C .. submodule update --init deps/hal
+git -C .. submodule update --init deps/hal deps/usp
 HAL=$(cd ../deps/hal && pwd)
 make -C "$HAL/libtools" libtinymt32.a
 make -C "$HAL/libloragw" libloragw.a
@@ -50,6 +50,23 @@ A positive result supplies the payload, byte count, packet RSSI, SNR, CRC-presen
 ## Send a packet and resume reception
 
 Link the optional `libsx1250_tx.a` before the RX library and call `sx1250_tx_send()` on an open receiver. Success means RF0 reported TxDone and the driver rearmed RF1. Physical operation requires an antenna or suitable load. [Build, failure handling and hardware limits](TX.md)
+
+## Receive on both radios
+
+Open one session with `sx1250_dual_open()`, passing a profile for RF0
+and a profile for RF1. Poll each chain with `sx1250_dual_next()` and
+close the session with `sx1250_dual_close()`. Both packet engines listen
+independently. One process owns SPI and serializes the calls.
+
+To transmit, pass a transmit profile and frame to `sx1250_dual_send()`.
+The driver defers when either radio has a pending reception. A completed
+send reports RF0 TxDone and verifies that both receivers returned to
+their original profiles. Retry only an explicit `EAGAIN`. The calling
+application owns transmit scheduling and airtime accounting.
+
+A Raspberry Pi trial received 62.5 kHz and 250 kHz LoRa traffic in parallel.
+The dual-receiver transmit handoff and recovery have been exercised in
+simulation. [Dual RX API](sx1250_dual.h) · [Dual TX API](sx1250_tx.h)
 
 ## Choose a hardware path
 

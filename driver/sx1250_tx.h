@@ -7,6 +7,8 @@
 extern "C" {
 #endif
 
+struct sx1250_rx_config;
+
 struct sx1250_handoff_report {
     /* Failed transition, including one recovered after TxDone, or NULL. */
     const char *failed_stage;
@@ -17,6 +19,7 @@ struct sx1250_handoff_report {
     bool tx_done;
     bool rf1_rearmed;
     bool cold_recovery;
+    bool rf0_rearmed; /* True for a successful dual RX restore only. */
 };
 
 /* Optional experimental half-duplex RF0 TX for the EU868 RAK2287.
@@ -36,6 +39,17 @@ int sx1250_tx_send(const uint8_t *payload, size_t length, unsigned timeout_ms);
 /* Use the same send transaction and optionally return its transition report. */
 int sx1250_tx_send_report(const uint8_t *payload, size_t length, unsigned timeout_ms,
                           struct sx1250_handoff_report *report);
+
+/* Send on RF0 using the explicit TX profile, then restore both RX profiles.
+ * Requires an antenna or suitable load, an open dual RX session and
+ * serialized access. The physical connector power is uncalibrated. EAGAIN did not
+ * transmit and retains pending RX events. Other failures may have sent the
+ * frame. Never blindly retry. RF0 and RF1 are either both verified rearmed or
+ * both report false. downtime_ns spans the pause attempt through verified
+ * rearm of both receivers, so it includes the time spent checking activity.
+ * This does not perform profile-specific regulatory or airtime checks. */
+int sx1250_dual_send(const struct sx1250_rx_config *profile, const uint8_t *payload, size_t length,
+                     unsigned timeout_ms, struct sx1250_handoff_report *report);
 
 #ifdef __cplusplus
 }

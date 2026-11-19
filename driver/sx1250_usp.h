@@ -2,7 +2,7 @@
 #define SX1250_USP_H
 #include "sx126x.h"
 
-/* RF1 is the only target for the USP command transport. */
-extern const uint8_t sx1250_usp_rf1;
+/* An address, rather than a caller-supplied value, identifies each RX target. */
+extern const uint8_t sx1250_usp_radios[2];
 
 #endif

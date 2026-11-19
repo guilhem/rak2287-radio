@@ -15,12 +15,17 @@ with tempfile.TemporaryDirectory() as scratch:
     tmp = Path(scratch)
     radio = tmp / "radio"
     radio.touch()
-    for name, main in [("api", "tests/api.c"), ("cli", "sx1250-rx.c"), ("reconfigure", "tests/reconfigure.c")]:
+    for name, main in [("api", "tests/api.c"), ("cli", "sx1250-rx.c"), ("reconfigure", "tests/reconfigure.c"),
+                       ("dual-rx", "tests/dual_rx.c")]:
         subprocess.run([cc, *flags, f"-I{usp_radio}", main, "libsx1250_rx.a", "libsx1250_fake_hal.a",
                         "-o", tmp / name], cwd=here, check=True)
     subprocess.run([cc, *flags, "tests/tx.c", "libsx1250_tx.a", "libsx1250_rx.a",
                     "libsx1250_fake_hal.a", "-o", tmp / "tx"], cwd=here, check=True)
     subprocess.run([tmp / "tx", radio], check=True, timeout=5)
+    subprocess.run([cc, *flags, "tests/dual_tx.c", "libsx1250_tx.a", "libsx1250_rx.a",
+                    "libsx1250_fake_hal.a", "-Wl,--wrap=sx1250_dual_pause,--wrap=sx1250_dual_resume_report",
+                    "-o", tmp / "dual-tx"], cwd=here, check=True)
+    subprocess.run([tmp / "dual-tx", radio], check=True, timeout=5)
     subprocess.run([cc, *flags, "examples/tx_probe.c", "libsx1250_tx.a", "libsx1250_rx.a",
                     "libsx1250_fake_hal.a", "-o", tmp / "tx-probe"], cwd=here, check=True)
     tx_args = [tmp / "tx-probe", "--enable-transmit", radio, "010203", "5"]
@@ -85,6 +90,7 @@ with tempfile.TemporaryDirectory() as scratch:
     subprocess.run([tmp / "cpp"], check=True, timeout=2)
     subprocess.run([tmp / "api", radio], check=True, capture_output=True, timeout=4)
     subprocess.run([tmp / "reconfigure", radio], check=True, capture_output=True, timeout=4)
+    subprocess.run([tmp / "dual-rx", radio], check=True, timeout=4)
     cmd = [tmp / "cli", "--device", radio, "--frequency", "869618000", "--bandwidth", "62500",
            "--sf", "8", "--cr", "8", "--sync", "0x12"]
     expected = b"RX\t-80.5\t-1.75\t" + bytes((230+i) % 256 for i in range(255)).hex().encode() + b"\n"
