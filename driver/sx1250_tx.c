@@ -96,7 +96,8 @@ static int configure_rf0_tx(const struct sx1250_rx_config *c, uint8_t length,
      * stage and FEM bypass on this board have no autonomous-mode calibration. */
     stage(report, "rf0-low-output-pa");
     return bank_write(tx_radio, SET_PA_CONFIG, (uint8_t[]){2, 2, 0, 1}, 4, 3) ||
-           bank_write(tx_radio, SET_TX_PARAMS, (uint8_t[]){(uint8_t)-9, SET_RAMP_200U}, 2, 3) ||
+           bank_write(tx_radio, SET_TX_PARAMS,
+                      (uint8_t[]){(uint8_t)SX1250_RF0_TX_SETTING_DBM, SET_RAMP_200U}, 2, 3) ||
            bank_read(tx_radio, READ_REGISTER, (uint8_t[]){8, 0xd8}, 2, &clamp, 1) ||
            bank_write(tx_radio, WRITE_REGISTER, (uint8_t[]){8, 0xd8, clamp | 0x1e}, 3, 3) ||
            bank_read(tx_radio, READ_REGISTER, (uint8_t[]){8, 0x89}, 2, &quality, 1) ||
@@ -206,7 +207,7 @@ static int load_and_send(const uint8_t *payload, size_t length, unsigned timeout
 
 static bool valid_tx(const struct sx1250_rx_config *c, const uint8_t *payload,
                      size_t length, unsigned timeout_ms) {
-    return payload && length && length <= 255 && timeout_ms && timeout_ms <= 120000 &&
+    return payload && length && length <= 255 && timeout_ms && timeout_ms <= SX1250_TX_TIMEOUT_MAX_MS &&
            (!c->implicit_length || length == c->implicit_length);
 }
 

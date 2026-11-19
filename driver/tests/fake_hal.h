@@ -9,6 +9,8 @@ extern "C" {
 /* Test-only, FAKE_TX=1, IDLE=1. Never accesses a radio device. */
 bool fake_inject_rx(const uint8_t *data, uint8_t size);
 bool fake_inject_rf0(const uint8_t *data, uint8_t size);
+/* Reject the next count RF1 SetRx commands. */
+void fake_fail_rf1_rearm(unsigned count);
 /* Latch a phase (0x04 preamble, 0x08 sync, 0x10 header) in an active RF1
  * reception. Repeating a phase does not produce another hardware edge. */
 bool fake_rx_progress(uint16_t flags);

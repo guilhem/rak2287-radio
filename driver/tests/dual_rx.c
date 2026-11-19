@@ -17,6 +17,68 @@ static void expect_frequency(unsigned rf, uint32_t hz) {
     assert(!memcmp(expected, actual, sizeof actual));
 }
 
+static void test_reconfigure(const struct sx1250_rx_config profiles[2]) {
+    struct sx1250_rx_config updated = profiles[0];
+    updated.frequency_hz = 869650000;
+    updated.sync_word = 0x2b;
+    const uint8_t payload[] = {0xc0, 0xdb, 0x12};
+    struct sx1250_rx_packet packet;
+
+    assert(sx1250_dual_reconfigure(2, &updated) < 0 && errno == EINVAL);
+    assert(sx1250_dual_reconfigure(1, NULL) < 0 && errno == EINVAL);
+    struct sx1250_rx_config invalid = updated;
+    invalid.frequency_hz = 870000000;
+    assert(sx1250_dual_reconfigure(1, &invalid) < 0 && errno == EINVAL);
+
+    assert(fake_rx_progress(4));
+    assert(sx1250_dual_reconfigure(1, &updated) < 0 && errno == EAGAIN);
+    assert(fake_inject_rx(payload, sizeof payload));
+    assert(sx1250_dual_reconfigure(1, &updated) < 0 && errno == EAGAIN);
+    assert(sx1250_dual_next(1, &packet) == 1 && packet.coding_rate == profiles[1].coding_rate);
+    assert(packet.size == sizeof payload && !memcmp(packet.payload, payload, sizeof payload));
+
+    assert(!setenv("FAKE_RX_DONE_ON_STANDBY", "1", 1));
+    assert(sx1250_dual_reconfigure(1, &updated) < 0 && errno == EAGAIN);
+    assert(!unsetenv("FAKE_RX_DONE_ON_STANDBY"));
+    expect_frequency(1, profiles[1].frequency_hz);
+    assert(sx1250_dual_next(1, &packet) == 1 && packet.crc_present);
+
+    /* A ready frame on the other receiver survives the reconfiguration. */
+    assert(fake_inject_rf0(payload, sizeof payload));
+    assert(!sx1250_dual_reconfigure(1, &updated));
+    expect_frequency(0, profiles[0].frequency_hz);
+    expect_frequency(1, updated.frequency_hz);
+    assert(sx1250_dual_next(0, &packet) == 1 && packet.coding_rate == profiles[0].coding_rate);
+    assert(packet.size == sizeof payload && !memcmp(packet.payload, payload, sizeof payload));
+
+    assert(fake_inject_rx(payload, sizeof payload));
+    assert(!sx1250_dual_reconfigure(0, &profiles[1]));
+    expect_frequency(0, profiles[1].frequency_hz);
+    assert(sx1250_dual_next(1, &packet) == 1 && packet.coding_rate == updated.coding_rate);
+    assert(packet.size == sizeof payload && !memcmp(packet.payload, payload, sizeof payload));
+
+    assert(!sx1250_dual_pause());
+    assert(sx1250_dual_reconfigure(1, &profiles[1]) < 0 && errno == EBUSY);
+    assert(!sx1250_dual_resume());
+    expect_frequency(0, profiles[1].frequency_hz);
+    expect_frequency(1, updated.frequency_hz);
+    uint8_t sync[2];
+    assert(!sx126x_read_register(&sx1250_usp_radios[1], 0x0740, sync, sizeof sync));
+    assert(sync[0] == 0x24 && sync[1] == 0xb4);
+
+    /* Roll back both the frequency and PHY if rearming the new profile fails. */
+    fake_fail_rf1_rearm(1);
+    assert(sx1250_dual_reconfigure(1, &profiles[1]) < 0 && errno == EIO);
+    expect_frequency(1, updated.frequency_hz);
+    assert(fake_inject_rx(payload, sizeof payload));
+    assert(sx1250_dual_next(1, &packet) == 1 && packet.coding_rate == updated.coding_rate);
+    assert(packet.size == sizeof payload && !memcmp(packet.payload, payload, sizeof payload));
+
+    fake_fail_rf1_rearm(2);
+    assert(sx1250_dual_reconfigure(1, &profiles[1]) < 0 && errno == EIO);
+    assert(sx1250_dual_next(1, &packet) < 0 && errno == EIO);
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     assert(!setenv("FAKE_DUAL_RX", "1", 1));
@@ -27,6 +89,7 @@ int main(int argc, char **argv) {
         {869475000, 250000, 16, 8, 5, 0x12, true, false, 0},
     };
     struct sx1250_rx_packet packet;
+    assert(sx1250_dual_reconfigure(0, profiles) < 0 && errno == ENODEV);
     assert(!sx1250_dual_open(argv[1], profiles));
     assert(sx1250_rx_open(argv[1], profiles) < 0 && errno == EBUSY);
     expect_frequency(0, profiles[0].frequency_hz);
@@ -66,6 +129,7 @@ int main(int argc, char **argv) {
     assert(!sx1250_dual_resume_report(false, &recovered) && recovered);
     assert(fake_inject_rf0(first, sizeof first));
     assert(sx1250_dual_next(0, &packet) == 1 && packet.crc_present);
+    test_reconfigure(profiles);
     assert(!sx1250_dual_close());
     assert(!sx1250_rx_open(argv[1], profiles));
     assert(!sx1250_rx_close());

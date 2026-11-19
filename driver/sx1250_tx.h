@@ -9,6 +9,11 @@ extern "C" {
 
 struct sx1250_rx_config;
 
+/* Nominal chip setting used by the fixed low-output PA path. Connector power
+ * depends on the board's RF path and has not been calibrated. */
+enum { SX1250_RF0_TX_SETTING_DBM = -9 };
+enum { SX1250_TX_TIMEOUT_MAX_MS = 120000 };
+
 struct sx1250_handoff_report {
     /* Failed transition, including one recovered after TxDone, or NULL. */
     const char *failed_stage;

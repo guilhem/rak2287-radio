@@ -1,33 +1,50 @@
-# RAK2287 radio
+# RAK2287 KISS modem
 
-Use the two SX1250 radios on a RAK2287 EU868 SPI concentrator from Linux. The C library can receive LoRa packets on RF1 alone or listen on both radios with independent profiles. Its optional half-duplex transmit path sends a packet on RF0 and restores reception. Applications supply their own packet bytes and radio profiles. The MeshCore adapter is one such application.
+Use a RAK2287 EU868 SPI concentrator as a LoRa packet modem on Linux. Two virtual serial ports let KISS clients set their own LoRa parameters and listen in parallel. Both ports share the transmitter on RF0. The modem carries raw LoRa bytes and signal measurements. Host applications handle routing, encryption and network identity.
 
-**A RAK2287 received and relayed MeshCore EU Narrow packets over the air at 62.5 kHz.** In a separate single-packet test, switching RF0 without per-packet resets reduced the RF1 receive gap from 1,649 ms to 687 ms. A second MeshCore node received the transmission. Antenna-port power and occupied spectrum remain unmeasured. [Hardware results](driver/TX.md)
+## Try it without a concentrator
 
-## Run the repeater in simulation
-
-On Linux, install Git, GNU Make, a C compiler, a C++17 compiler, Python 3 and `patch`. The test runs without a concentrator, GPIO access or root privileges.
+From this checkout on Linux, use GNU Make, a C compiler and Python 3.
 
 ```sh
-git clone --recurse-submodules https://github.com/guilhem/rak2287-radio.git
-cd rak2287-radio
-make -j2 check
+make -j2 kiss-check
 ```
 
-The test feeds synthetic EU Narrow packets into a simulated RF1 FIFO. The MeshCore repeater decides which packets to forward and appends its path hash. The production C driver writes the forwarded bytes to the simulated RF0 FIFO, waits for the transmit-complete interrupt, and rearms RF1. The scenario checks a second reception and duplicate suppression. Separate tests exercise timeout and recovery failures.
+The tests configure two serial ports on a simulated modem, receive raw packets with RSSI and SNR, and submit overlapping send requests. The simulated radio handles the sends in sequence. The test runner reports `OK` on success.
 
-## Choose an interface
+## Listen with a RAK2287
 
-| Goal | Entry point |
+Connect the EU868 SPI variant of the RAK2287 to a Linux host with SPI enabled. Give your user access to the SPI device and run the board reset helper for your hardware after stopping the process that currently owns the concentrator. [Board and SPI setup](driver/README.md)
+
+```sh
+git submodule update --init deps/hal deps/usp
+make -j2 kiss
+install -d -m 700 "$XDG_RUNTIME_DIR/rak-kiss"
+./build/rak-kiss "$XDG_RUNTIME_DIR/rak-kiss" /dev/spidev0.0
+```
+
+Use the SPI device for your host and a dedicated absolute runtime directory. When `RAK_KISS_READY` prints, open `rf0` or `rf1` inside that directory with a local KISS client running as the same user. Use one client per port, with KISS port number 0 on each serial device. `kisstool info --dev "$XDG_RUNTIME_DIR/rak-kiss/rf0"` reports `Mesh KISS v2` and the current settings. Send `SetRadio` on a port to activate packet delivery. The command above runs in receive-only mode. [RepeaterTastic's `kisstool`](https://github.com/ScotMesh/RepeaterTastic/blob/768a030998b8e3cac18e059bb6eb2a73ad4d1dc6/docs/hardware.md#check-the-modem)
+
+## Configure a port
+
+The modem uses the LoRa radio commands from MeshCore KISS with the Mesh KISS v2 additions from ScotMesh. An accepted setting applies to that receive chain and to sends on behalf of the same port. Packets use an explicit LoRa header, CRC and normal IQ. A receive in progress on the selected chain or an RF0 transmission can defer a profile change with `TxBusy`. Read the applied settings back with the corresponding `Get` command. Reapply the desired profiles when the service restarts.
+
+| Commands | Effect |
 | --- | --- |
-| Receive packets from a physical board | `make receiver` builds the RX-only CLI. It writes payload bytes in hexadecimal plus RSSI and SNR to stdout. [Receiver guide](driver/README.md) |
-| Integrate your own application | Open a LoRa profile with `sx1250_rx_open()`. Use `sx1250_rx_next()` for reception. Link the optional transmit API to call `sx1250_tx_send()`. [RX API](driver/sx1250_rx.h) · [TX API and error handling](driver/sx1250_tx.h) |
-| Receive on two channels at once | Use `sx1250_dual_open()` and poll each RF chain. When an application sends through RF0, the driver checks both receivers for activity and restores both profiles after sending. [Dual-radio API](driver/sx1250_dual.h) · [Integration guide](driver/README.md#receive-on-both-radios) |
-| Observe MeshCore routing without transmitting | `make monitor` builds the stdin observer. It accepts packets from the RX-only CLI and reports forwarding decisions. [MeshCore adapter](integration/native-monitor.md) |
-| Share RF1 between two listening profiles | `make usp-rx monitor` builds the Semtech USP receiver and MeshCore observer. Set the LoRa parameters and listening durations in a profile file to observe MeshCore and Meshtastic in alternating slots. [Configurable receiver guide](integration/usp-receiver.md) |
-| Build the experimental RF0/RF1 MeshCore repeater | `make radio-repeater` builds the physical backend. Running it requires a separate transmit opt-in. The EU Narrow profile is 869.618 MHz, SF8, 62.5 kHz, CR 4/8 and private sync 0x12. [Repeater guide and validation](integration/radio-repeater.md) |
-| Use the standard multichannel gateway again | Stop the packet driver, reset the board using the helper for your hardware, then start the gateway software. [Hardware and ownership](driver/README.md) |
+| `SetRadio` / `GetRadio` | Center frequency and bandwidth in Hz, spreading factor and coding rate denominator. The [driver's ranges](driver/sx1250_rx.h) apply. |
+| `SetSyncWord`, `SetPreamble`, `GetPhyExtra` | Sync word and preamble length in symbols. A zero preamble selects 32 symbols through SF8 and 16 above SF8. |
+| `SetTxPower` / `GetTxPower` | RF0 uses a fixed nominal chip setting of −9 dBm (signed byte `0xf7`). Other requests return `InvalidParam`. Output power at the board connector is uncalibrated. |
+| `Data`, `SetSignalReport`, `RxMeta` | Raw LoRa packets and optional RX metadata. By default each forwarded packet includes RSSI in dBm and SNR in quarter dB. |
+| `Data`, `TxDone` | Queue one send per port. A successful `TxDone` means RF0 completed transmission and both receive chains rearmed. |
 
-The board and HAL have a single owner during a packet-radio session. During a transmission RF1 cannot receive. A successful transmit call means the driver observed RF0 `TxDone` and rearmed RF1. Delivery to another node needs a separate receiver or protocol acknowledgement.
+`IsChannelBusy` reports observed packet reception on either chain or an RF0 handoff in progress. `Ping`, `GetVersion`, `GetDeviceName`, `GetStats` and `GetAirtime` support modem queries. The serial `TXDELAY` command sets the minimum wait before a request can start. [MeshCore modem commands](https://github.com/meshcore-dev/MeshCore/blob/75b04ef06def54b348400cb1b138afb6749ffd4f/docs/kiss_modem_protocol.md) · [Mesh KISS v2 additions](https://github.com/ScotMesh/RepeaterTastic/blob/768a030998b8e3cac18e059bb6eb2a73ad4d1dc6/firmware/0001-kiss-modem-sync-word-preamble.patch)
 
-The code uses BSD-3-Clause. Upstream source and binary notices are listed separately. [License](LICENSE) · [Third-party notices](NOTICE.md)
+Clients that automatically apply a power setting must be able to send the signed setting above. The tested RepeaterTastic profile resolver replaces nonpositive requests with the region default. The tested openHop wrapper packs power as an unsigned byte. These limits affect automatic configuration in both stock applications. [RepeaterTastic profile resolution](https://github.com/ScotMesh/RepeaterTastic/blob/768a030998b8e3cac18e059bb6eb2a73ad4d1dc6/internal/phy/phy.go#L193-L198) · [openHop KISS wrapper](https://github.com/openhop-dev/openhop_core/blob/e07722ea96093752ac8b3c6772d653f8b68224bf/src/openhop_core/hardware/kiss_modem_wrapper.py#L1206-L1218)
+
+## Shared transmission
+
+On a controlled RF bench with an antenna or suitable load, `--enable-transmit` allows Data requests to use RF0. The modem rotates between pending ports and waits for both receive chains to be idle. Both chains pause during TX. Read-only KISS queries continue to work on both ports. Pending requests can expire before transmission when the radio stays busy or the shared airtime limit delays the next turn. Treat a missing or failed `TxDone` as unconfirmed delivery. On shutdown, the modem waits for any active RF0 handoff to finish before releasing the board.
+
+The underlying transmitter was tested over the air with MeshCore EU Narrow. The KISS service and per-port reconfiguration were exercised in simulation. [RF0 bench results](driver/TX.md) · [Driver development and board ownership](driver/README.md)
+
+[License](LICENSE) · [Third-party notices](NOTICE.md)

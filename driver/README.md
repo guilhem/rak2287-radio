@@ -57,11 +57,14 @@ Open one session with `sx1250_dual_open()`, passing a profile for RF0
 and a profile for RF1. Poll each chain with `sx1250_dual_next()` and
 close the session with `sx1250_dual_close()`. Both packet engines listen
 independently. One process owns SPI and serializes the calls.
+Use `sx1250_dual_reconfigure()` to retune one receiver while the other
+listens. `EAGAIN` means the selected chain is receiving or has a packet
+pending. Poll the packet before retrying.
 
 To transmit, pass a transmit profile and frame to `sx1250_dual_send()`.
 The driver defers when either radio has a pending reception. A completed
 send reports RF0 TxDone and verifies that both receivers returned to
-their original profiles. Retry only an explicit `EAGAIN`. The calling
+their current profiles. Retry only an explicit `EAGAIN`. The calling
 application owns transmit scheduling and airtime accounting.
 
 A Raspberry Pi trial received 62.5 kHz and 250 kHz LoRa traffic in parallel.

@@ -402,6 +402,42 @@ int sx1250_dual_activity(unsigned rf) {
     return rc < 0 ? dual_fault() : rc;
 }
 
+static bool receive_pending(const struct receiver *rx, sx126x_irq_mask_t flags) {
+    unsigned phase = preamble_detected | (rx->profile.implicit_length ? 0 : header_valid);
+    return (flags & (terminal_irq | (phase & ~rx->activity.ignored))) != 0;
+}
+
+int sx1250_dual_reconfigure(unsigned rf, const struct sx1250_rx_config *config) {
+    if (rf > 1 || !sx1250_lora_profile_valid(config)) { errno = EINVAL; return -1; }
+    int busy = sx1250_dual_activity(rf);
+    if (busy < 0) return -1;
+    if (busy) { errno = EAGAIN; return -1; }
+
+    struct receiver *rx = &receivers[rf];
+    const void *radio = &sx1250_usp_radios[rf];
+    sx126x_irq_mask_t flags;
+    if (sx126x_set_standby(radio, SX126X_STANDBY_CFG_XOSC) ||
+        sx126x_get_irq_status(radio, &flags)) return dual_fault();
+    if (receive_pending(rx, flags)) {
+        /* Keep a terminal IRQ and its FIFO for the next poll. */
+        if (!(flags & terminal_irq) && arm(rf)) return dual_fault();
+        errno = EAGAIN;
+        return -1;
+    }
+
+    /* These profiles all use the same EU868 image calibration. */
+    bool retune = config->frequency_hz != rx->profile.frequency_hz;
+    if ((retune && set_frequency(rf, config->frequency_hz)) || configure_rx(rf, config)) {
+        if (sx126x_set_standby(radio, SX126X_STANDBY_CFG_XOSC) ||
+            (retune && set_frequency(rf, rx->profile.frequency_hz)) ||
+            configure_rx(rf, &rx->profile)) return dual_fault();
+        errno = EIO;
+        return -1;
+    }
+    rx->profile = *config;
+    return 0;
+}
+
 int sx1250_dual_pause(void) {
     if (check_dual()) return -1;
     if (paused) { errno = EBUSY; return -1; }
@@ -416,12 +452,10 @@ int sx1250_dual_pause(void) {
         int busy = sx1250_dual_activity(frozen);
         if (busy < 0) return -1;
         if (busy) break;
-        const struct receiver *rx = &receivers[frozen];
         const void *radio = &sx1250_usp_radios[frozen];
         if (sx126x_set_standby(radio, SX126X_STANDBY_CFG_XOSC) ||
             sx126x_get_irq_status(radio, &flags[frozen])) return dual_fault();
-        unsigned phase = preamble_detected | (rx->profile.implicit_length ? 0 : header_valid);
-        bool defer = (flags[frozen] & (terminal_irq | (phase & ~rx->activity.ignored))) != 0;
+        bool defer = receive_pending(&receivers[frozen], flags[frozen]);
         ++frozen;
         if (defer) goto defer;
     }

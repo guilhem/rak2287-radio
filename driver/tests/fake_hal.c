@@ -15,6 +15,7 @@
 
 static bool connected;
 static unsigned mode, packet_type, irq, arms, irq_mask;
+static unsigned rf1_rearm_failures;
 static uint8_t regs[65536], tag, configured_cr, rf1_mod[4], rf1_packet[6];
 
 static int32_t lines[LGW_TOTALREGS];
@@ -99,6 +100,8 @@ bool fake_inject_rf0(const uint8_t *data, uint8_t size) {
     tx_mode = 2;
     return true;
 }
+
+void fake_fail_rf1_rearm(unsigned count) { rf1_rearm_failures = count; }
 
 static int tx_write(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
     bool dual_rx = getenv("FAKE_DUAL_RX") != NULL;
@@ -246,6 +249,7 @@ int lgw_connect(lgw_com_type_t t, const char *p) {
     assert(t == LGW_COM_SPI && p);
     connected = true; regs[0x0587] = 0x20; arms = 0; irq = 0; sent_size = injected_size = rf0_rx_size = 0;
     restoring = tx_started = false; memset(lines, 0, sizeof lines);
+    rf1_rearm_failures = 0;
     tx_commands = 0;
     injected_warm_fault = false;
     puts("HAL connected");
@@ -342,6 +346,7 @@ int sx1250_reg_w(sx1250_op_code_t op, uint8_t *p, uint16_t n, uint8_t c) {
     }
     case SET_RX:
         assert(n == 3 && !p[0] && !p[1] && !p[2]);
+        if (rf1_rearm_failures) { --rf1_rearm_failures; return -1; }
         if (restoring && fault("rearm")) return -1;
         if (restoring) {
             assert(lines[SX1302_REG_AGC_MCU_RF_EN_A_LNA_EN] && lines[SX1302_REG_AGC_MCU_RF_EN_B_LNA_EN]);
