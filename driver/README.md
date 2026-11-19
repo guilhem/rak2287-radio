@@ -1,6 +1,6 @@
 # SX1250 packet radio for the RAK2287
 
-Read LoRa packets on Linux directly from one or both radios of a RAK2287 EU868 SPI concentrator. An application gets the original packet bytes, RSSI and SNR through a C API. The command-line receiver listens on RF1. An optional transmit library sends on RF0 and restores reception. A GFSK receive example uses the same board interface.
+Read LoRa packets on Linux directly from one or both radios of a RAK2287 SPI concentrator. An application gets the original packet bytes, RSSI and SNR through a C API. The command-line receiver listens on RF1. An optional transmit library sends on RF0 and restores reception. A GFSK receive example uses the same board interface.
 
 The tested board is a RAK2287 in a Raspberry Pi 4 hotspot. In single-receiver mode, RF0 supplies the clock and RF1 exposes its demodulated packets through the SX1302 SPI multiplexer. On this board RF1 received an SF8, 62.5 kHz packet whose 53 bytes exactly matched a simultaneous I/Q recording decoded on the host. The packet driver runs without loading custom concentrator firmware.
 
@@ -64,6 +64,7 @@ pending. Poll the packet before retrying.
 Use `sx1250_dual_send()` to transmit at the board's default power. To
 select a specific level, check it with `sx1250_tx_power_supported()` and
 pass it to `sx1250_dual_send_with_power()` along with the profile and frame.
+The supported levels are nominal chip settings from −9 to +22 dBm.
 The driver defers when either radio has a pending reception. A completed
 send reports RF0 TxDone and verifies that both receivers returned to
 their current profiles. Retry only an explicit `EAGAIN`. The calling
@@ -83,7 +84,7 @@ simulation. [Dual RX API](sx1250_dual.h) · [Dual TX API](sx1250_tx.h)
 | I/Q sampling and capture RAM | Use the concentrator capture path in a separate session. Sustained I/Q sampling has different SPI throughput requirements from packet FIFO reads. |
 | Transmission | The optional library sends on RF0 using the open LoRa profile. The half-duplex handoff is tested with a simulated HAL. |
 
-The frequency range in this build follows the tested EU868 front end and the stock HAL's calibration limits. Board reset wiring, front-end controls and regulatory band differ across gateway models. [RAK2287 hardware](https://docs.rakwireless.com/product-categories/wislink/rak2287/datasheet/)
+Supported center frequencies fall inside the stock HAL's image-calibration intervals of 430–440, 470–510, 779–787, 863–870 and 902–928 MHz, excluding the endpoints. Retuning into a different interval recalibrates that radio. Use the RF band of the installed board variant and apply local rules in the application. [Semtech calibration](https://github.com/Lora-net/sx1302_hal/blob/4b42025d1751e04632c0b04160e0d29dbbb222a5/libloragw/src/loragw_sx1250.c#L92-L133) · [RAK2287 hardware](https://docs.rakwireless.com/product-categories/wislink/rak2287/datasheet/)
 
 ## Source and licenses
 

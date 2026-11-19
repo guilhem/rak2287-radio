@@ -17,21 +17,8 @@ static const bool radio_verbose = false;
 
 enum { tx_radio = 0, tx_done = 1, timer_irq = 0x200 };
 
-/* Add levels once their output at the connector has been measured with this PA setting. */
-static const struct rf0_power_level {
-    int8_t power_dbm, chip_setting;
-} rf0_power_levels[] = {
-    {SX1250_RF0_TX_SETTING_DBM, SX1250_RF0_TX_SETTING_DBM},
-};
-
-static const struct rf0_power_level *find_rf0_power(int8_t power_dbm) {
-    for (size_t i = 0; i < sizeof rf0_power_levels / sizeof *rf0_power_levels; ++i)
-        if (rf0_power_levels[i].power_dbm == power_dbm) return &rf0_power_levels[i];
-    return NULL;
-}
-
 bool sx1250_tx_power_supported(int8_t power_dbm) {
-    return find_rf0_power(power_dbm) != NULL;
+    return power_dbm >= SX1250_RF0_TX_POWER_MIN_DBM && power_dbm <= SX1250_RF0_TX_POWER_MAX_DBM;
 }
 
 static void stage(struct sx1250_handoff_report *report, const char *name) {
@@ -319,8 +306,8 @@ int sx1250_dual_send_with_power(const struct sx1250_rx_config *profile, int8_t p
                                 struct sx1250_handoff_report *report) {
     if (report) *report = (struct sx1250_handoff_report){0};
     stage(report, "validate");
-    const struct rf0_power_level *power = find_rf0_power(power_dbm);
-    if (!power || !sx1250_lora_profile_valid(profile) || !valid_tx(profile, payload, length, timeout_ms)) {
+    if (!sx1250_tx_power_supported(power_dbm) || !sx1250_lora_profile_valid(profile) ||
+        !valid_tx(profile, payload, length, timeout_ms)) {
         errno = EINVAL;
         return -1;
     }
@@ -333,9 +320,13 @@ int sx1250_dual_send_with_power(const struct sx1250_rx_config *profile, int8_t p
     uint8_t saved[SPANS(bridge_spans)][4];
     bool saved_valid = !pa_off() && !lnas(0) &&
         !snapshot(bridge_spans, SPANS(bridge_spans), saved);
-    /* Both banks are already in packet mode and calibrated for this EU band. */
-    int err = !saved_valid || configure_rf0_tx(profile, length, power->chip_setting, report) ? EIO :
-        load_and_send(payload, length, timeout_ms, false, report);
+    int err = EIO;
+    if (saved_valid) {
+        stage(report, "rf0-image-calibration");
+        if (!sx1250_board_calibrate_for_frequency(tx_radio, profile->frequency_hz) &&
+            !configure_rf0_tx(profile, length, power_dbm, report))
+            err = load_and_send(payload, length, timeout_ms, false, report);
+    }
 
     bool force_cold = false;
     if (saved_valid) {

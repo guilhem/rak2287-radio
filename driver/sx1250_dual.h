@@ -20,7 +20,9 @@ int sx1250_dual_activity(unsigned rf);
 /* Change one receive profile and rearm that chain. EAGAIN preserves the
  * current profile when reception or FIFO data blocks the change. EBUSY means
  * the session is paused. If applying a new profile fails, the driver attempts
- * to restore the prior profile. A failed restoration faults the session. */
+ * to restore the prior profile. A failed rollback across calibration bands
+ * can reset both radios and restore both prior profiles. The call returns
+ * EIO even after recovery. A failed restoration faults the session. */
 int sx1250_dual_reconfigure(unsigned rf, const struct sx1250_rx_config *config);
 
 /* Pause for shared-front-end operations. EAGAIN means a receive is pending

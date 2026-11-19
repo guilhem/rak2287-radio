@@ -220,7 +220,8 @@ class ModemTest(unittest.TestCase):
         with self.modem(hold_tx=True) as trial, trial.port(0) as rf0, trial.port(1) as rf1:
             self.assertEqual(rf0.command(0x0C), b"\x06\x8c\xf7")
             self.assertEqual(rf1.command(0x0C), b"\x06\x8c\xf7")
-            self.assertEqual(rf0.command(0x0A, b"\x16"), b"\x06\xf1\x02")
+            for power in (-10, 23):
+                self.assertEqual(rf0.command(0x0A, struct.pack("b", power)), b"\x06\xf1\x02")
             self.assertEqual(rf0.command(0x0C), b"\x06\x8c\xf7")
             self.assertEqual(rf1.command(0x0C), b"\x06\x8c\xf7")
 
@@ -245,6 +246,29 @@ class ModemTest(unittest.TestCase):
             "SET_TX hz=869300000 bw=250000 sf=9 cr=5 sync=2b preamble=16 power_dbm=8 payload=22",
             "SET_TX hz=869618000 bw=62500 sf=8 cr=8 sync=12 preamble=32 power_dbm=14 payload=11",
             "SET_TX hz=869300000 bw=250000 sf=9 cr=5 sync=2b preamble=16 power_dbm=-9 payload=33",
+        ])
+
+    def test_back_to_back_transmissions_at_915_and_923_mhz(self):
+        profile_915 = struct.pack("<IIBB", 915300000, 125000, 10, 5)
+        profile_923 = struct.pack("<IIBB", 923100000, 250000, 9, 8)
+        with self.modem(hold_tx=True, FAKE_LONG_TX="1") as trial, trial.port(0) as rf0, trial.port(1) as rf1:
+            # Either modeled airtime times nine exceeds the queue deadline.
+            self.configure(rf0, profile_915, 0x12, 128)
+            self.configure(rf1, profile_923, 0x2B, 256)
+            self.assertEqual(rf0.command(0x0A, b"\x16"), OK)
+            self.assertEqual(rf0.command(0x0C), b"\x06\x8c\x16")
+            rf0.send(b"\x00\x3a")
+            rf1.send(b"\x00\x4b")
+            self.assertEqual(rf0.command(0x17), PONG)
+            self.assertEqual(rf1.command(0x17), PONG)
+            trial.gate.touch()
+            self.assertEqual(rf0.event(), TX_OK)
+            self.assertEqual(rf1.event(), TX_OK)
+            self.assertEqual(rf0.command(0x0B), b"\x06\x8b" + profile_915)
+            self.assertEqual(rf1.command(0x0B), b"\x06\x8b" + profile_923)
+        self.assertCountEqual(trial.tx_calls, [
+            "SET_TX hz=915300000 bw=125000 sf=10 cr=5 sync=12 preamble=128 power_dbm=22 payload=3a",
+            "SET_TX hz=923100000 bw=250000 sf=9 cr=8 sync=2b preamble=256 power_dbm=-9 payload=4b",
         ])
 
     def test_receive_only_never_transmits(self):

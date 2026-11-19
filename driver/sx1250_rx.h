@@ -7,11 +7,13 @@
 extern "C" {
 #endif
 
-/* Independent LoRa packet reception on RF1 of the RAK2287 EU868.
- * Supported RF center 863000001..869999999 Hz, BW 7812/10417/15625/20833/31250/41667/
- * 62500/125000/250000/500000 Hz (Semtech integer values), SF5..12, CR denominator 5..8, any 8-bit sync word. Preamble is >= 8
- * symbols (>= 12 for SF5/6). Bandwidth/SF combinations outside the tested
- * EU Narrow profile follow Semtech command encodings and need RF validation. */
+/* Independent LoRa packet reception on RF1 of the RAK2287.
+ * RF center within the HAL image-calibration intervals (430–440, 470–510,
+ * 779–787, 863–870 or 902–928 MHz, excluding endpoints).
+ * BW 7812/10417/15625/20833/31250/41667/62500/125000/250000/500000 Hz,
+ * SF5..12, CR denominator 5..8 and any 8-bit sync word. Preamble is >= 8
+ * symbols (>= 12 for SF5/6). Bandwidth and SF follow Semtech command
+ * encodings. The MeshCore EU Narrow profile was tested over the air. */
 struct sx1250_rx_config {
     uint32_t frequency_hz, bandwidth_hz;
     uint16_t preamble_symbols;

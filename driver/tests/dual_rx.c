@@ -19,9 +19,11 @@ static void expect_frequency(unsigned rf, uint32_t hz) {
 
 static void test_reconfigure(const struct sx1250_rx_config profiles[2]) {
     struct sx1250_rx_config updated = profiles[0];
-    updated.frequency_hz = 869650000;
+    updated.frequency_hz = 915600000;
     updated.sync_word = 0x2b;
     const uint8_t payload[] = {0xc0, 0xdb, 0x12};
+    const unsigned rf0_calibrations = fake_image_calibrations(0);
+    const unsigned rf1_calibrations = fake_image_calibrations(1);
     struct sx1250_rx_packet packet;
 
     assert(sx1250_dual_reconfigure(2, &updated) < 0 && errno == EINVAL);
@@ -29,6 +31,7 @@ static void test_reconfigure(const struct sx1250_rx_config profiles[2]) {
     struct sx1250_rx_config invalid = updated;
     invalid.frequency_hz = 870000000;
     assert(sx1250_dual_reconfigure(1, &invalid) < 0 && errno == EINVAL);
+    assert(fake_image_calibrations(1) == rf1_calibrations);
 
     assert(fake_rx_progress(4));
     assert(sx1250_dual_reconfigure(1, &updated) < 0 && errno == EAGAIN);
@@ -48,6 +51,7 @@ static void test_reconfigure(const struct sx1250_rx_config profiles[2]) {
     assert(!sx1250_dual_reconfigure(1, &updated));
     expect_frequency(0, profiles[0].frequency_hz);
     expect_frequency(1, updated.frequency_hz);
+    assert(fake_image_band(1) == 902000000 && fake_image_calibrations(1) == rf1_calibrations + 1);
     assert(sx1250_dual_next(0, &packet) == 1 && packet.coding_rate == profiles[0].coding_rate);
     assert(packet.size == sizeof payload && !memcmp(packet.payload, payload, sizeof payload));
 
@@ -62,19 +66,34 @@ static void test_reconfigure(const struct sx1250_rx_config profiles[2]) {
     assert(!sx1250_dual_resume());
     expect_frequency(0, profiles[1].frequency_hz);
     expect_frequency(1, updated.frequency_hz);
+    assert(fake_image_calibrations(0) == rf0_calibrations);
+    assert(fake_image_calibrations(1) == rf1_calibrations + 1);
     uint8_t sync[2];
     assert(!sx126x_read_register(&sx1250_usp_radios[1], 0x0740, sync, sizeof sync));
     assert(sync[0] == 0x24 && sync[1] == 0xb4);
+
+    /* If a latched error prevents warm rollback, recover both old profiles. */
+    fake_fail_image_calibration(1);
+    assert(sx1250_dual_reconfigure(1, &profiles[1]) < 0 && errno == EIO);
+    expect_frequency(0, profiles[1].frequency_hz);
+    expect_frequency(1, updated.frequency_hz);
+    assert(fake_image_band(0) == 863000000 && fake_image_calibrations(0) == rf0_calibrations + 1);
+    assert(fake_image_band(1) == 902000000 && fake_image_calibrations(1) == rf1_calibrations + 4);
+    assert(fake_inject_rf0(payload, sizeof payload));
+    assert(sx1250_dual_next(0, &packet) == 1 && packet.coding_rate == profiles[1].coding_rate);
+    assert(fake_inject_rx(payload, sizeof payload));
+    assert(sx1250_dual_next(1, &packet) == 1 && packet.coding_rate == updated.coding_rate);
 
     /* Roll back both the frequency and PHY if rearming the new profile fails. */
     fake_fail_rf1_rearm(1);
     assert(sx1250_dual_reconfigure(1, &profiles[1]) < 0 && errno == EIO);
     expect_frequency(1, updated.frequency_hz);
+    assert(fake_image_band(1) == 902000000 && fake_image_calibrations(1) == rf1_calibrations + 6);
     assert(fake_inject_rx(payload, sizeof payload));
     assert(sx1250_dual_next(1, &packet) == 1 && packet.coding_rate == updated.coding_rate);
     assert(packet.size == sizeof payload && !memcmp(packet.payload, payload, sizeof payload));
 
-    fake_fail_rf1_rearm(2);
+    fake_fail_rf1_rearm(3);
     assert(sx1250_dual_reconfigure(1, &profiles[1]) < 0 && errno == EIO);
     assert(sx1250_dual_next(1, &packet) < 0 && errno == EIO);
 }
@@ -92,6 +111,7 @@ int main(int argc, char **argv) {
     assert(sx1250_dual_reconfigure(0, profiles) < 0 && errno == ENODEV);
     assert(!sx1250_dual_open(argv[1], profiles));
     assert(sx1250_rx_open(argv[1], profiles) < 0 && errno == EBUSY);
+    assert(fake_image_calibrations(0) == 1 && fake_image_calibrations(1) == 1);
     expect_frequency(0, profiles[0].frequency_hz);
     expect_frequency(1, profiles[1].frequency_hz);
 
@@ -127,6 +147,7 @@ int main(int argc, char **argv) {
     assert(!sx1250_dual_pause());
     assert(!lgw_reg_w(SX1302_REG_COMMON_CTRL0_CLK32_RIF_CTRL, 1));
     assert(!sx1250_dual_resume_report(false, &recovered) && recovered);
+    assert(fake_image_calibrations(0) == 2 && fake_image_calibrations(1) == 2);
     assert(fake_inject_rf0(first, sizeof first));
     assert(sx1250_dual_next(0, &packet) == 1 && packet.crc_present);
     test_reconfigure(profiles);

@@ -56,7 +56,6 @@ static struct transmission {
     pthread_t thread;
     bool active;
     unsigned rf, timeout_ms;
-    uint32_t airtime_ms;
     struct sx1250_rx_config profile;
     int8_t power_dbm;
     uint8_t payload[MAX_PACKET];
@@ -431,7 +430,7 @@ static int start_transmission(void) {
     return error;
 }
 
-static int collect_transmission(unsigned *turn, int64_t *next_tx) {
+static int collect_transmission(unsigned *turn) {
     if (!transmission.active) return 0;
     int error = pthread_tryjoin_np(transmission.thread, NULL);
     if (error == EBUSY) return 0;
@@ -448,11 +447,6 @@ static int collect_transmission(unsigned *turn, int64_t *next_tx) {
         if (flush_port(port)) return -1;
     }
     *turn = (transmission.rf + 1) % N_PORTS;
-    if (report->tx_started) {
-        const int64_t ended = clock_ms();
-        if (ended < 0) return -1;
-        *next_tx = ended + 9 * (int64_t)transmission.airtime_ms;
-    }
     if (transmission.result < 0 && (!report->rf0_rearmed || !report->rf1_rearmed)) {
         errno = transmission.error;
         return -1;
@@ -460,8 +454,8 @@ static int collect_transmission(unsigned *turn, int64_t *next_tx) {
     return 0;
 }
 
-static int schedule_tx(unsigned turn, int64_t next_tx, int64_t now) {
-    if (stopping || transmission.active || now < next_tx) return 0;
+static int schedule_tx(unsigned turn, int64_t now) {
+    if (stopping || transmission.active) return 0;
     for (unsigned i = 0; i < N_PORTS; ++i) {
         const unsigned rf = (turn + i) % N_PORTS;
         struct port *port = &ports[rf];
@@ -477,7 +471,7 @@ static int schedule_tx(unsigned turn, int64_t next_tx, int64_t now) {
         transmission = (struct transmission){
             .rf = rf, .profile = port->profile, .size = port->pending_size,
             .power_dbm = port->pending_power_dbm,
-            .airtime_ms = airtime, .timeout_ms = 2 * airtime + TX_MARGIN_MS,
+            .timeout_ms = 2 * airtime + TX_MARGIN_MS,
         };
         if (transmission.timeout_ms > SX1250_TX_TIMEOUT_MAX_MS)
             transmission.timeout_ms = SX1250_TX_TIMEOUT_MAX_MS;
@@ -495,7 +489,6 @@ static int schedule_tx(unsigned turn, int64_t next_tx, int64_t now) {
 
 static int run(bool allow_tx) {
     unsigned turn = 0;
-    int64_t next_tx = 0;
     while (!stopping) {
         struct pollfd descriptors[N_PORTS];
         for (unsigned i = 0; i < N_PORTS; ++i) {
@@ -519,7 +512,7 @@ static int run(bool allow_tx) {
         if (now < 0) return -1;
         for (unsigned i = 0; i < N_PORTS; ++i)
             if (service_port(i, descriptors[i].revents, allow_tx, now)) return -1;
-        if (collect_transmission(&turn, &next_tx)) return -1;
+        if (collect_transmission(&turn)) return -1;
         for (unsigned i = 0; !transmission.active && i < N_PORTS; ++i)
             if (forward_rx(i) < 0) return -1;
         const int64_t transmit_time = clock_ms();
@@ -532,7 +525,7 @@ static int run(bool allow_tx) {
                 tx_done(port, 0);
             }
         }
-        if (schedule_tx(turn, next_tx, transmit_time)) return -1;
+        if (schedule_tx(turn, transmit_time)) return -1;
     }
     return 0;
 }

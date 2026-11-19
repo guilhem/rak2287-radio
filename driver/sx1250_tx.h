@@ -9,9 +9,13 @@ extern "C" {
 
 struct sx1250_rx_config;
 
-/* Nominal chip setting used by the fixed low-output PA path. Connector power
- * depends on the board's RF path and has not been calibrated. */
-enum { SX1250_RF0_TX_SETTING_DBM = -9 };
+/* Nominal chip settings for the RF0 packet transmitter. Connector power
+ * depends on the board's RF path. */
+enum {
+    SX1250_RF0_TX_POWER_MIN_DBM = -9,
+    SX1250_RF0_TX_POWER_MAX_DBM = 22,
+    SX1250_RF0_TX_SETTING_DBM = SX1250_RF0_TX_POWER_MIN_DBM,
+};
 enum { SX1250_TX_TIMEOUT_MAX_MS = 120000 };
 
 struct sx1250_handoff_report {
@@ -27,7 +31,7 @@ struct sx1250_handoff_report {
     bool rf0_rearmed; /* True for a successful dual RX restore only. */
 };
 
-/* Optional experimental half-duplex RF0 TX for the EU868 RAK2287.
+/* Optional experimental half-duplex RF0 TX for the RAK2287.
  * Requires an antenna or suitable load and a serialized, open LoRa RX context.
  * The physical connector power is uncalibrated. Uses the current LoRa profile.
  * timeout_ms (1..120000) limits SetTx airtime/wait. Setup and any recovery add

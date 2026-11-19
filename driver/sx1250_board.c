@@ -19,6 +19,7 @@ static int lock_fd = -1;
 static bool connected, configured;
 static bool rf0_reset_valid;
 static uint8_t rf0_reset_values[SX1250_RF0_RESET_SPAN_COUNT][4];
+static uint32_t image_bands[2];
 
 /* The pinned HAL changes these registers when entering its I/Q bridge mode. */
 const struct sx1250_reg_span sx1250_rf0_reset_spans[SX1250_RF0_RESET_SPAN_COUNT] = {
@@ -57,6 +58,7 @@ int sx1250_board_release(void) {
     error |= close(lock_fd);
     lock_fd = -1;
     connected = configured = rf0_reset_valid = false;
+    image_bands[0] = image_bands[1] = 0;
     atomic_flag_clear(&owner);
     if (error) { errno = EIO; return -1; }
     return 0;
@@ -105,22 +107,34 @@ static int enable_rx_frontend(void) {
            lgw_reg_w(SX1302_REG_AGC_MCU_RF_EN_B_LNA_EN, 1);
 }
 
+static int calibrate_and_wake(unsigned rf, uint32_t hz) {
+    if (sx1250_calibrate(rf, hz) || bank_write(rf, SET_STANDBY, (uint8_t[]){STDBY_XOSC}, 1, 3))
+        return -1;
+    image_bands[rf] = sx1250_image_band(hz);
+    return 0;
+}
+
+int sx1250_board_calibrate_for_frequency(unsigned rf, uint32_t hz) {
+    uint32_t band = sx1250_image_band(hz);
+    if (rf >= 2 || !band) { errno = EINVAL; return -1; }
+    if (image_bands[rf] == band) return 0;
+    image_bands[rf] = 0;
+    if (bank_write(rf, SET_STANDBY, (uint8_t[]){STDBY_RC}, 1, 2)) return -1;
+    return calibrate_and_wake(rf, hz);
+}
+
 static int tune_receiver(unsigned rf, uint32_t hz) {
     uint32_t frf = SX1250_FREQ_TO_REG(hz);
     uint8_t freq[] = {frf >> 24, frf >> 16, frf >> 8, frf}, check[4];
     return bank_write(rf, SET_STANDBY, (uint8_t[]){STDBY_RC}, 1, 2) ||
-           bank_write(rf, CALIBRATE, (uint8_t[]){0x7f}, 1, 2) || sx1250_calibrate(rf, hz) ||
-           bank_write(rf, SET_STANDBY, (uint8_t[]){STDBY_XOSC}, 1, 3) ||
+           bank_write(rf, CALIBRATE, (uint8_t[]){0x7f}, 1, 2) || calibrate_and_wake(rf, hz) ||
            bank_write(rf, SET_RF_FREQUENCY, freq, sizeof freq, 3) ||
            bank_read(rf, READ_REGISTER, (uint8_t[]){8, 0x8b}, 2, check, sizeof check) ||
            memcmp(check, freq, sizeof freq);
 }
 
-/* The stock image calibrator uses strict inequalities for the EU band. */
-static bool valid_frequency(uint32_t hz) { return hz > 863000000 && hz < 870000000; }
-
 int sx1250_board_acquire(const char *path, uint32_t hz) {
-    if (!valid_frequency(hz)) { errno = EINVAL; return -1; }
+    if (!sx1250_image_band(hz)) { errno = EINVAL; return -1; }
     if (connect_board(path)) return -1;
     if (sx1302_radio_host_ctrl(true) || sx1302_radio_reset(0, LGW_RADIO_TYPE_SX1250) ||
         sx1302_radio_set_mode(0, LGW_RADIO_TYPE_SX1250)) goto fail;
@@ -155,6 +169,7 @@ int sx1250_board_enable_dual_rx(void) {
 
 int sx1250_board_recover_dual(const uint32_t frequency_hz[2]) {
     /* RIF runs on the SPI clock. Neither chip starts the I/Q clock bridge. */
+    image_bands[0] = image_bands[1] = 0;
     if (sx1302_radio_host_ctrl(true) ||
         lgw_reg_w(SX1302_REG_AGC_MCU_RF_EN_A_PA_EN, 0) ||
         lgw_reg_w(SX1302_REG_AGC_MCU_RF_EN_B_PA_EN, 0) ||
@@ -173,7 +188,7 @@ int sx1250_board_recover_dual(const uint32_t frequency_hz[2]) {
 }
 
 int sx1250_board_acquire_dual(const char *path, const uint32_t frequency_hz[2]) {
-    if (!frequency_hz || !valid_frequency(frequency_hz[0]) || !valid_frequency(frequency_hz[1])) {
+    if (!frequency_hz || !sx1250_image_band(frequency_hz[0]) || !sx1250_image_band(frequency_hz[1])) {
         errno = EINVAL;
         return -1;
     }

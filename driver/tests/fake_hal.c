@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "../sx1250_board.h"
 #include "fake_hal.h"
 #include "loragw_hal.h"
 #include "loragw_reg.h"
@@ -26,6 +27,10 @@ static uint8_t rf0_rx[255], rf0_rx_size, rf0_rx_cr;
 static bool restoring, tx_started, tx_params_set;
 static unsigned tx_commands;
 static bool injected_warm_fault;
+static uint8_t expected_tx_power;
+static uint32_t image_bands[2], last_tx_image_band;
+static unsigned image_calibrations[2];
+static bool image_calibration_failed[2];
 
 #ifdef HANDOVER_BENCH
 /* The handover executable links the pinned reset, setup, calibration and SPI
@@ -102,6 +107,11 @@ bool fake_inject_rf0(const uint8_t *data, uint8_t size) {
 }
 
 void fake_fail_rf1_rearm(unsigned count) { rf1_rearm_failures = count; }
+void fake_expect_tx_power(uint8_t power) { expected_tx_power = power; }
+void fake_fail_image_calibration(unsigned rf) { assert(rf < 2); image_calibration_failed[rf] = true; }
+uint32_t fake_image_band(unsigned rf) { assert(rf < 2); return image_bands[rf]; }
+unsigned fake_image_calibrations(unsigned rf) { assert(rf < 2); return image_calibrations[rf]; }
+uint32_t fake_last_tx_image_band(void) { return last_tx_image_band; }
 
 static int tx_write(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
     bool dual_rx = getenv("FAKE_DUAL_RX") != NULL;
@@ -152,7 +162,7 @@ static int tx_write(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
 #endif
         break;
     case SET_TX_PARAMS:
-        assert(n == 2 && p[0] == 0xf7 && p[1] == SET_RAMP_200U);
+        assert(n == 2 && p[0] == expected_tx_power && p[1] == SET_RAMP_200U);
         tx_params_set = true;
         break;
     case SET_BUFFER_BASE_ADDRESS: case SET_DIO_IRQ_PARAMS: break;
@@ -163,6 +173,7 @@ static int tx_write(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
         assert(!getenv("FAKE_FORBID_TX") && (!dual_rx || getenv("FAKE_DUAL_TX")));
         assert(tx_params_set);
         tx_params_set = false;
+        last_tx_image_band = image_bands[0];
         ++tx_commands;
         assert(!getenv("FAKE_SINGLE_TX") || tx_commands == 1);
         assert(n == 3 && (p[0] || p[1] || p[2]) && tx_mode == 3 && mode == 3 && tx_size);
@@ -258,6 +269,10 @@ int lgw_connect(lgw_com_type_t t, const char *p) {
     rf1_rearm_failures = 0;
     tx_commands = 0;
     injected_warm_fault = false;
+    expected_tx_power = 0xf7;
+    image_bands[0] = image_bands[1] = last_tx_image_band = 0;
+    image_calibrations[0] = image_calibrations[1] = 0;
+    image_calibration_failed[0] = image_calibration_failed[1] = false;
     puts("HAL connected");
     return getenv("FAIL_CONNECT") ? -1 : 0;
 }
@@ -298,6 +313,8 @@ int lgw_reg_w(uint16_t reg, int32_t val) {
 #ifndef HANDOVER_BENCH
 int sx1302_radio_host_ctrl(bool b) { (void)b; return 0; }
 int sx1302_radio_reset(uint8_t c, lgw_radio_type_t t) { assert(c <= 1 && t == LGW_RADIO_TYPE_SX1250);
+    image_bands[c] = 0;
+    image_calibration_failed[c] = false;
     lines[SX1302_REG_COMMON_CTRL0_CLK32_RIF_CTRL] = 0;
     if (!c) { tx_mode = 2; tx_irq = 0; tx_type = PACKET_TYPE_GFSK;
         if (getenv("FAKE_DUAL_RX")) tx_regs[0x08e7] = 0x5a;
@@ -316,8 +333,15 @@ int sx1302_pa_lna_lut_configure(struct lgw_conf_board_s *b) { assert(!b->full_du
 int sx1250_setup(uint8_t c, uint32_t f, bool single) { assert(!c && f && !single);
     tx_regs[0x0587] = 0x0b; tx_mode = 5; restoring = tx_started; return 0; }
 int sx1250_calibrate(uint8_t c, uint32_t f) {
-    assert(f && ((c == 1 && mode == 2) ||
-                 (!c && tx_mode == 2 && (getenv("FAKE_TX") || getenv("FAKE_DUAL_RX")))));
+    const uint32_t band = sx1250_image_band(f);
+    assert(band && ((c == 1 && mode == 2) ||
+                    (!c && tx_mode == 2 && (getenv("FAKE_TX") || getenv("FAKE_DUAL_RX")))));
+    ++image_calibrations[c];
+    if (image_calibration_failed[c]) {
+        image_bands[c] = 0;
+        return -1;
+    }
+    image_bands[c] = band;
     return 0;
 }
 void wait_ms(unsigned long t) { (void)t; }

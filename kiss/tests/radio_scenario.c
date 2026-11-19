@@ -8,6 +8,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "sx1250_board.h"
 #include "sx1250_dual.h"
 #include "sx1250_tx.h"
 
@@ -16,7 +17,7 @@ static bool configured[2], delivered[2];
 static atomic_bool receiving;
 
 bool sx1250_lora_profile_valid(const struct sx1250_rx_config *profile) {
-    return profile && profile->frequency_hz > 863000000 && profile->frequency_hz < 870000000 &&
+    return profile && sx1250_image_band(profile->frequency_hz) &&
            profile->bandwidth_hz && profile->spreading_factor >= 5 && profile->spreading_factor <= 12 &&
            profile->coding_rate >= 5 && profile->coding_rate <= 8 &&
            profile->preamble_symbols >= (profile->spreading_factor <= 6 ? 12 : 8);
@@ -83,8 +84,7 @@ uint32_t sx1250_lora_airtime_ms(const struct sx1250_rx_config *profile, uint8_t 
 }
 
 bool sx1250_tx_power_supported(int8_t power_dbm) {
-    /* Exercise per-port settings with two additional simulated levels. */
-    return power_dbm == SX1250_RF0_TX_SETTING_DBM || power_dbm == 8 || power_dbm == 14;
+    return power_dbm >= SX1250_RF0_TX_POWER_MIN_DBM && power_dbm <= SX1250_RF0_TX_POWER_MAX_DBM;
 }
 
 int sx1250_dual_send_with_power(const struct sx1250_rx_config *profile, int8_t power_dbm,

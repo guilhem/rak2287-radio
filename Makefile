@@ -26,8 +26,8 @@ kiss: hal $(BUILD)/rak-kiss.o
 	$(CC) $(LDFLAGS) -pthread -Wl,--gc-sections -o "$(BUILD)/rak-kiss" "$(BUILD)/rak-kiss.o" \
 	    driver/libsx1250_tx.a driver/libsx1250_rx.a $(HAL_LIBS) -lrt -lm $(LDLIBS)
 
-$(BUILD)/rak-kiss-sim: $(BUILD)/rak-kiss.o kiss/tests/radio_scenario.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(KISS_FLAGS) $(LDFLAGS) -o "$@" $^ -lm $(LDLIBS)
+$(BUILD)/rak-kiss-sim: $(BUILD)/rak-kiss.o kiss/tests/radio_scenario.c driver/sx1250_board.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(KISS_FLAGS) $(LDFLAGS) -o "$@" $(filter %.o %.c,$^) -lm $(LDLIBS)
 
 kiss-sim: $(BUILD)/rak-kiss-sim
 
