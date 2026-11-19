@@ -7,12 +7,30 @@
 #include "sx126x_hal.h"
 #include "fake_hal.h"
 
+static void test_image_calibration_limits(struct sx1250_rx_config profile) {
+    const uint32_t intervals[][2] = {
+        {430000000, 440000000}, {470000000, 510000000}, {779000000, 787000000},
+        {863000000, 870000000}, {902000000, 928000000},
+    };
+    for (size_t i = 0; i < sizeof intervals / sizeof *intervals; ++i) {
+        profile.frequency_hz = intervals[i][0];
+        assert(!sx1250_lora_profile_valid(&profile));
+        ++profile.frequency_hz;
+        assert(sx1250_lora_profile_valid(&profile));
+        profile.frequency_hz = intervals[i][1];
+        assert(!sx1250_lora_profile_valid(&profile));
+        --profile.frequency_hz;
+        assert(sx1250_lora_profile_valid(&profile));
+    }
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     const struct sx1250_rx_config narrow = {
         .frequency_hz = 869618000, .bandwidth_hz = 62500, .preamble_symbols = 16,
         .spreading_factor = 8, .coding_rate = 8, .sync_word = 0x12, .require_crc = true,
     };
+    test_image_calibration_limits(narrow);
     struct sx1250_rx_config wide = narrow;
     wide.frequency_hz = 869525000;
     wide.bandwidth_hz = 250000;
@@ -77,5 +95,11 @@ int main(int argc, char **argv) {
     assert(!fake_inject_rx(data, sizeof data));
     assert(sx1250_rx_reconfigure(&narrow, true) == 0);
     assert(sx1250_rx_next(&packet, 0) == 0);
+    assert(fake_image_band(1) == 863000000 && fake_image_calibrations(1) == 1);
+    wide.frequency_hz = 915525000;
+    assert(!sx1250_rx_reconfigure(&wide, false));
+    assert(fake_image_band(1) == 902000000 && fake_image_calibrations(1) == 2);
+    assert(fake_inject_rx(data, sizeof data));
+    assert(sx1250_rx_next(&packet, 0) == 1 && packet.coding_rate == wide.coding_rate);
     assert(!sx1250_rx_close());
 }

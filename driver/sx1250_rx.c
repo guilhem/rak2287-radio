@@ -57,7 +57,7 @@ bool sx1250_lora_profile_valid(const struct sx1250_rx_config *c) {
     return c && c->spreading_factor >= 5 && c->spreading_factor <= 12 &&
            c->coding_rate >= 5 && c->coding_rate <= 8 && bw_code(c->bandwidth_hz) >= 0 &&
            c->preamble_symbols >= (c->spreading_factor <= 6 ? 12 : 8) &&
-           c->frequency_hz > 863000000 && c->frequency_hz < 870000000;
+           sx1250_image_band(c->frequency_hz);
 }
 
 static sx126x_mod_params_lora_t mod_params(const struct sx1250_rx_config *c) {
@@ -132,7 +132,8 @@ static int set_frequency(unsigned rf, uint32_t hz) {
     const void *radio = &sx1250_usp_radios[rf];
     uint32_t pll = SX1250_FREQ_TO_REG(hz);
     uint8_t expected[] = {pll >> 24, pll >> 16, pll >> 8, pll}, check[4];
-    return sx126x_set_rf_freq_in_pll_steps(radio, pll) ||
+    return sx1250_board_calibrate_for_frequency(rf, hz) ||
+           sx126x_set_rf_freq_in_pll_steps(radio, pll) ||
            sx126x_read_register(radio, 0x088b, check, sizeof check) ||
            memcmp(expected, check, sizeof check);
 }
@@ -156,7 +157,6 @@ int sx1250_rx_reconfigure(const struct sx1250_rx_config *c, bool force) {
         errno = EAGAIN;
         return -1;
     }
-    /* Reuse the current image calibration anywhere in the EU868 range. */
     if ((c->frequency_hz != rx->profile.frequency_hz && set_frequency(chain, c->frequency_hz)) ||
         configure_rx(chain, c)) goto fault;
     rx->profile = *c;
@@ -402,6 +402,56 @@ int sx1250_dual_activity(unsigned rf) {
     return rc < 0 ? dual_fault() : rc;
 }
 
+static bool receive_pending(const struct receiver *rx, sx126x_irq_mask_t flags) {
+    unsigned phase = preamble_detected | (rx->profile.implicit_length ? 0 : header_valid);
+    return (flags & (terminal_irq | (phase & ~rx->activity.ignored))) != 0;
+}
+
+static int configure_both(void) {
+    for (unsigned rf = 0; rf < 2; ++rf)
+        if (configure_rx(rf, &receivers[rf].profile)) return -1;
+    return 0;
+}
+
+static int recover_dual_rx(void) {
+    const uint32_t frequencies[] = {receivers[0].profile.frequency_hz, receivers[1].profile.frequency_hz};
+    return sx1250_board_recover_dual(frequencies) || configure_both();
+}
+
+int sx1250_dual_reconfigure(unsigned rf, const struct sx1250_rx_config *config) {
+    if (rf > 1 || !sx1250_lora_profile_valid(config)) { errno = EINVAL; return -1; }
+    int busy = sx1250_dual_activity(rf);
+    if (busy < 0) return -1;
+    if (busy) { errno = EAGAIN; return -1; }
+
+    struct receiver *rx = &receivers[rf];
+    const void *radio = &sx1250_usp_radios[rf];
+    sx126x_irq_mask_t flags;
+    if (sx126x_set_standby(radio, SX126X_STANDBY_CFG_XOSC) ||
+        sx126x_get_irq_status(radio, &flags)) return dual_fault();
+    if (receive_pending(rx, flags)) {
+        /* Keep a terminal IRQ and its FIFO for the next poll. */
+        if (!(flags & terminal_irq) && arm(rf)) return dual_fault();
+        errno = EAGAIN;
+        return -1;
+    }
+
+    const uint32_t old_frequency = rx->profile.frequency_hz;
+    bool retune = config->frequency_hz != old_frequency;
+    if ((retune && set_frequency(rf, config->frequency_hz)) || configure_rx(rf, config)) {
+        if (sx126x_set_standby(radio, SX126X_STANDBY_CFG_XOSC) ||
+            (retune && set_frequency(rf, old_frequency)) || configure_rx(rf, &rx->profile)) {
+            /* A recorded image-calibration error can prevent warm rollback. */
+            if (sx1250_image_band(config->frequency_hz) == sx1250_image_band(old_frequency) ||
+                recover_dual_rx()) return dual_fault();
+        }
+        errno = EIO;
+        return -1;
+    }
+    rx->profile = *config;
+    return 0;
+}
+
 int sx1250_dual_pause(void) {
     if (check_dual()) return -1;
     if (paused) { errno = EBUSY; return -1; }
@@ -416,12 +466,10 @@ int sx1250_dual_pause(void) {
         int busy = sx1250_dual_activity(frozen);
         if (busy < 0) return -1;
         if (busy) break;
-        const struct receiver *rx = &receivers[frozen];
         const void *radio = &sx1250_usp_radios[frozen];
         if (sx126x_set_standby(radio, SX126X_STANDBY_CFG_XOSC) ||
             sx126x_get_irq_status(radio, &flags[frozen])) return dual_fault();
-        unsigned phase = preamble_detected | (rx->profile.implicit_length ? 0 : header_valid);
-        bool defer = (flags[frozen] & (terminal_irq | (phase & ~rx->activity.ignored))) != 0;
+        bool defer = receive_pending(&receivers[frozen], flags[frozen]);
         ++frozen;
         if (defer) goto defer;
     }
@@ -437,16 +485,10 @@ defer:
     return -1;
 }
 
-static int configure_both(void) {
-    for (unsigned rf = 0; rf < 2; ++rf)
-        if (configure_rx(rf, &receivers[rf].profile)) return -1;
-    return 0;
-}
-
-static int restore_dual_rx(const uint32_t frequencies[2]) {
+static int restore_dual_rx(void) {
     for (unsigned rf = 0; rf < 2; ++rf)
         if (sx126x_set_standby(&sx1250_usp_radios[rf], SX126X_STANDBY_CFG_XOSC) ||
-            set_frequency(rf, frequencies[rf])) return -1;
+            set_frequency(rf, receivers[rf].profile.frequency_hz)) return -1;
     return sx1250_board_enable_dual_rx() || configure_both();
 }
 
@@ -454,10 +496,9 @@ int sx1250_dual_resume_report(bool force_cold, bool *cold_recovery) {
     if (cold_recovery) *cold_recovery = false;
     if (check_dual()) return -1;
     if (!paused) { errno = EINVAL; return -1; }
-    uint32_t frequencies[] = {receivers[0].profile.frequency_hz, receivers[1].profile.frequency_hz};
-    if (force_cold || restore_dual_rx(frequencies)) {
+    if (force_cold || restore_dual_rx()) {
         if (cold_recovery) *cold_recovery = true;
-        if (sx1250_board_recover_dual(frequencies) || configure_both()) return dual_fault();
+        if (recover_dual_rx()) return dual_fault();
     }
     paused = false;
     return 0;

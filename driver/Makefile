@@ -15,7 +15,7 @@ libsx1250_tx.a: sx1250_tx.o
 libsx1250_fake_hal.a: tests/fake_hal.o
 	$(AR) rcs $@ $^
 sx1250_tx.o: sx1250_tx.h sx1250_tx_handoff.h sx1250_tx_warm_impl.h sx1250_board.h sx1250_dual.h sx1250_io.h sx1250_lora.h sx1250_rx_internal.h sx1250_rx.h
-tests/fake_hal.o: tests/fake_hal.h
+tests/fake_hal.o: tests/fake_hal.h sx1250_board.h
 libsx1250_rx.a: $(OBJS)
 	$(AR) rcs $@ $^
 sx1250-rx: sx1250-rx.o libsx1250_rx.a

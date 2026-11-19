@@ -17,11 +17,19 @@ int sx1250_dual_next(unsigned rf, struct sx1250_rx_packet *packet);
 /* Return 1 for a receive in progress or a pending packet, or 0 for idle. */
 int sx1250_dual_activity(unsigned rf);
 
+/* Change one receive profile and rearm that chain. EAGAIN preserves the
+ * current profile when reception or FIFO data blocks the change. EBUSY means
+ * the session is paused. If applying a new profile fails, the driver attempts
+ * to restore the prior profile. A failed rollback across calibration bands
+ * can reset both radios and restore both prior profiles. The call returns
+ * EIO even after recovery. A failed restoration faults the session. */
+int sx1250_dual_reconfigure(unsigned rf, const struct sx1250_rx_config *config);
+
 /* Pause for shared-front-end operations. EAGAIN means a receive is pending
  * and there was no handoff. Pending FIFO data remains available to next().
  * A late preamble can still race a hardware standby command. */
 int sx1250_dual_pause(void);
-/* Restore both original receive profiles and rearm after successful pause.
+/* Restore both current receive profiles and rearm after successful pause.
  * Includes one board recovery attempt on a failed restoration. */
 int sx1250_dual_resume(void);
 
