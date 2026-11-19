@@ -10,6 +10,7 @@ int main() {
     if (sx1250_board_acquire(nullptr, 0) != -1 || errno != EINVAL) return 1;
     if (sx1250_rx_open(nullptr, &config) != -1 || errno != EINVAL) return 1;
     if (sx1250_rx_next(&packet, 0) != -1 || errno != ENODEV) return 1;
+    if (sx1250_rx_activity() != -1 || errno != ENODEV) return 1;
     if (sx1250_tx_send(nullptr, 0, 1) != -1 || errno != ENODEV) return 1;
     return 0;
 }

@@ -1,5 +1,7 @@
 *.o
 *.a
 /sx1250-rx
+/sx1250-tx-probe
+/sx1250-tx-warm-probe
 /gfsk_rx
 __pycache__/

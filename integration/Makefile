@@ -49,7 +49,8 @@ $(BUILD)/meshcore-rx-monitor: $(OBJECTS) $(BUILD)/monitor.o
 # The normal observer has no dependency on the radio driver or its transmit code.
 DRIVER ?= $(abspath ../driver)
 HAL ?= $(abspath ../sx1302_hal)
-RADIO_OBJECTS := $(addprefix $(BUILD)/,sx1250_rx.o sx1250_tx.o sx1250_board.o)
+USP ?= $(abspath ../deps/usp)
+RADIO_LIBS := $(DRIVER)/libsx1250_tx.a $(DRIVER)/libsx1250_rx.a
 REPEATER_OBJECTS := $(filter-out $(BUILD)/CommonCLI.o,$(OBJECTS)) $(BUILD)/RepeaterCLI.o $(BUILD)/repeater.o
 # The native preference loader clamps even stricter persisted budgets to 9x.
 # Keep the loaded value for the external radio target's validation.
@@ -60,16 +61,25 @@ HAL_LIBS := $(HAL)/libloragw/libloragw.a $(HAL)/libtools/libtinymt32.a
 .PHONY: radio-repeater simulated-repeater
 radio-repeater: $(BUILD)/meshcore-radio-repeater
 simulated-repeater: $(BUILD)/meshcore-sim-repeater
-vpath %.c $(DRIVER) $(DRIVER)/tests tests $(ED)
-$(BUILD)/repeater.o $(RADIO_OBJECTS) $(BUILD)/fake_hal.o $(BUILD)/radio_scenario.o: CPPFLAGS += -I$(DRIVER) -I$(HAL)/libloragw/inc
-$(RADIO_OBJECTS) $(BUILD)/fake_hal.o $(BUILD)/radio_scenario.o: | $(BUILD)
-$(BUILD)/meshcore-radio-repeater: $(REPEATER_OBJECTS) $(RADIO_OBJECTS) $(HAL_LIBS)
+vpath %.c $(DRIVER)/tests tests $(ED)
+$(BUILD)/repeater.o $(BUILD)/fake_hal.o $(BUILD)/radio_scenario.o: CPPFLAGS += -I$(DRIVER) -I$(HAL)/libloragw/inc
+$(BUILD)/fake_hal.o $(BUILD)/radio_scenario.o: | $(BUILD)
+.PHONY: radio-libraries-force
+$(RADIO_LIBS) &: radio-libraries-force
+	$(MAKE) -C "$(DRIVER)" HAL="$(HAL)" USP="$(USP)" libsx1250_tx.a libsx1250_rx.a
+$(BUILD)/meshcore-radio-repeater: $(REPEATER_OBJECTS) $(RADIO_LIBS) $(HAL_LIBS)
 	$(CXX) $(LDFLAGS) -Wl,--gc-sections $^ -lrt -lm -o "$@"
-$(BUILD)/meshcore-sim-repeater: $(REPEATER_OBJECTS) $(RADIO_OBJECTS) $(BUILD)/fake_hal.o $(BUILD)/radio_scenario.o
-	$(CXX) $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=sx1250_rx_next,--wrap=sx1250_tx_send $^ -o "$@"
--include $(BUILD)/RepeaterCLI.d $(RADIO_OBJECTS:.o=.d) $(BUILD)/fake_hal.d $(BUILD)/radio_scenario.d
+$(BUILD)/meshcore-sim-repeater: $(REPEATER_OBJECTS) $(BUILD)/fake_hal.o $(BUILD)/radio_scenario.o $(RADIO_LIBS)
+	$(CXX) $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=sx1250_rx_next,--wrap=sx1250_rx_activity,--wrap=sx1250_tx_send_report $^ -o "$@"
+-include $(BUILD)/RepeaterCLI.d $(BUILD)/fake_hal.d $(BUILD)/radio_scenario.d
 
+$(BUILD)/repeater_queue_test.o: tests/repeater_queue_test.cpp repeater_queue.h | $(BUILD) check-revisions
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -UNDEBUG -c "$<" -o "$@"
+$(BUILD)/repeater-queue-test: $(BUILD)/repeater_queue_test.o $(BUILD)/StaticPoolPacketManager.o $(BUILD)/Packet.o
+	$(CXX) $(LDFLAGS) -Wl,--gc-sections $^ -o "$@"
+-include $(BUILD)/repeater_queue_test.d
 .PHONY: check
-check: $(BUILD)/meshcore-rx-monitor simulated-repeater
+check: $(BUILD)/repeater-queue-test $(BUILD)/meshcore-rx-monitor simulated-repeater
+	"$(BUILD)/repeater-queue-test"
 	python3 -B test_monitor.py "$(BUILD)/meshcore-rx-monitor"
 	python3 -B test_repeater.py "$(BUILD)/meshcore-sim-repeater"

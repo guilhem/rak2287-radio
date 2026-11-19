@@ -1,8 +1,10 @@
 #include "MyMesh.h"
+#include "repeater_queue.h"
 #include "sx1250_rx.h"
 #include "sx1250_tx.h"
 
 #include <cerrno>
+#include <cinttypes>
 #include <climits>
 #include <csignal>
 #include <cstdio>
@@ -14,27 +16,37 @@
 
 static volatile std::sig_atomic_t stopping;
 static void stop(int) { stopping = 1; }
+static constexpr sx1250_rx_config profile{869618000, 62500, 16, 8, 8, 0x12, true, false, 0};
 
 class Radio : public ExternalRadio {
     bool txDone = false;
-    bool havePending = false;
-    sx1250_rx_packet pending{};
+    bool deferred = false;
 
 public:
     int failure = 0;
-    unsigned busyDrops = 0;
+    unsigned busyDeferrals = 0;
+    uint32_t getEstAirtimeFor(int len) override {
+        return len > 0 && len <= UINT8_MAX ? sx1250_lora_airtime_ms(&profile, len) : 0;
+    }
+    bool takeDeferred() {
+        bool result = deferred;
+        deferred = false;
+        return result;
+    }
+    bool isReceiving() override {
+        if (failure || stopping) return true;
+        int activity = sx1250_rx_activity();
+        if (activity < 0) {
+            failure = errno;
+            std::perror("sx1250_rx_activity");
+        }
+        return activity != 0;
+    }
 
     int recvRaw(uint8_t* dest, int capacity) override {
         if (failure || stopping) return 0;
         sx1250_rx_packet p{};
-        int n;
-        if (havePending) {
-            p = pending;
-            havePending = false;
-            n = 1;
-        } else {
-            n = sx1250_rx_next(&p, 0);
-        }
+        int n = sx1250_rx_next(&p, 0);
         if (n < 0) {
             failure = errno;
             std::perror("sx1250_rx_next");
@@ -57,26 +69,25 @@ public:
         if (failure || stopping || len <= 0 || len > MAX_TRANS_UNIT) return false;
         // Serialized driver operation: success means RF0 TxDone AND RF1 rearmed.
         const unsigned timeout = 2 * getEstAirtimeFor(len) + 500;
-        int rc = sx1250_tx_send(data, len, timeout);
-        if (rc < 0 && errno == EAGAIN && !havePending) {
-            // The driver saw a packet before enabling RF0. Keep it for the next
-            // dispatcher poll, then retry only this explicitly unstarted send.
-            int n = sx1250_rx_next(&pending, 0);
-            if (n < 0) {
-                failure = errno;
-                std::perror("sx1250_rx_next before transmit");
-                return false;
-            }
-            havePending = n == 1;
-            if (stopping) return false;
-            rc = sx1250_tx_send(data, len, timeout);
-        }
-        if (rc < 0 && errno == EAGAIN) {
-            ++busyDrops; // A second arrival wins; the driver remains in receive mode.
+        sx1250_handoff_report handoff{};
+        int rc = sx1250_tx_send_report(data, len, timeout, &handoff);
+        const int error = rc < 0 ? errno : 0;
+        if (error == EAGAIN) {
+            deferred = true;
+            ++busyDeferrals;
             return false;
         }
+        std::printf("RADIO_TX bytes=%d rf1_downtime_ns=%" PRId64
+                    " tx_started=%d tx_done=%d rf1_rearmed=%d cold_recovery=%d stage=%s error=%d"
+                    " payload_type=%d\n",
+                    len, handoff.downtime_ns, handoff.tx_started, handoff.tx_done,
+                    handoff.rf1_rearmed, handoff.cold_recovery,
+                    handoff.failed_stage ? handoff.failed_stage : "none", error,
+                    (data[0] >> PH_TYPE_SHIFT) & PH_TYPE_MASK);
+        std::fflush(stdout);
         if (rc < 0) {
-            failure = errno;
+            failure = error;
+            errno = error;
             std::perror("sx1250_tx_send");
             return false;
         }
@@ -95,9 +106,20 @@ ExternalRadio& radio_driver = physical;
 
 // Forwarding is handled by simple_repeater. This target exposes no remote CLI.
 class Repeater : public MyMesh {
+    RepeaterQueue queue;
 public:
-    using MyMesh::MyMesh;
+    Repeater(mesh::MainBoard& b, mesh::Radio& r, mesh::MillisecondClock& clock,
+             mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables)
+        : MyMesh(b, r, clock, rng, rtc, tables), queue(*_mgr) { _mgr = &queue; }
+
 protected:
+    void logTxFail(mesh::Packet* packet, int len) override {
+        if (physical.takeDeferred()) {
+            queue.defer(packet, futureMillis(getCADFailRetryDelay()));
+        } else {
+            MyMesh::logTxFail(packet, len);
+        }
+    }
     void onAnonDataRecv(mesh::Packet*, const uint8_t*, const mesh::Identity&, uint8_t*, size_t) override {}
     void onPeerDataRecv(mesh::Packet*, uint8_t, int, const uint8_t*, uint8_t*, size_t) override {}
 };
@@ -159,7 +181,6 @@ int main(int argc, char** argv) {
     for (unsigned n : mesh.self_id.pub_key) std::printf("%02x", n);
     std::puts("");
     std::fflush(stdout);
-    sx1250_rx_config profile{869618000, 62500, 16, 8, 8, 0x12, true, false, 0};
     if (sx1250_rx_open(argv[3], &profile) < 0) {
         std::perror("sx1250_rx_open");
         return 1;
@@ -179,6 +200,8 @@ int main(int argc, char** argv) {
         physical.failure = EINVAL;
     }
     std::printf("Post-send silence factor: %g\n", silence);
+    if (!physical.failure) std::puts("RADIO_RX_READY");
+    std::fflush(stdout);
     while (!stopping && !physical.failure) {
         rtc_clock.tick();
         mesh.loop();
@@ -187,10 +210,10 @@ int main(int argc, char** argv) {
     int closed = sx1250_rx_close();
     if (closed) std::perror("sx1250_rx_close");
     std::printf("SUMMARY received=%u flood=%u direct=%u flood_dups=%u direct_dups=%u "
-                "rejected=%u sent=%u flood_tx=%u direct_tx=%u busy_drops=%u\n",
+                "rejected=%u sent=%u flood_tx=%u direct_tx=%u busy_deferrals=%u\n",
                 physical.getPacketsRecv(), mesh.getNumRecvFlood(), mesh.getNumRecvDirect(),
                 tables.getNumFloodDups(), tables.getNumDirectDups(), physical.getPacketsRecvErrors(),
-                physical.getPacketsSent(), mesh.getNumSentFlood(), mesh.getNumSentDirect(), physical.busyDrops);
+                physical.getPacketsSent(), mesh.getNumSentFlood(), mesh.getNumSentDirect(), physical.busyDeferrals);
     close(dir);
     return (closed || physical.failure) ? 1 : 0;
 }
