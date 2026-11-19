@@ -1,4 +1,4 @@
-"""Exercise the modem's Linux PTYs against an instrumented radio."""
+"""Exercise the modem's Linux PTYs with a simulated driver or HAL."""
 
 from collections import deque
 from contextlib import contextmanager, nullcontext
@@ -116,9 +116,10 @@ class Trial:
         return [line for line in self.log.splitlines() if line.startswith("SET_TX ")]
 
 
-class ModemTest(unittest.TestCase):
+class ModemTestCase(unittest.TestCase):
     @contextmanager
-    def modem(self, *, tx=True, hold_tx=False, hold_in_flight=False, directory=None, **env):
+    def modem(self, *, tx=True, hold_tx=False, hold_in_flight=False, directory=None,
+              device="/simulated-spi", **env):
         runtime = nullcontext(directory) if directory is not None else tempfile.TemporaryDirectory()
         with runtime as dirname, tempfile.TemporaryFile() as log:
             trial = Trial(Path(dirname), log)
@@ -126,7 +127,7 @@ class ModemTest(unittest.TestCase):
                 env["FAKE_TX_GATE"] = str(trial.gate)
             if hold_in_flight:
                 env["FAKE_TX_IN_FLIGHT"] = str(trial.gate)
-            args = [MODEM, trial.directory, "/simulated-spi"]
+            args = [MODEM, trial.directory, device]
             if tx:
                 args.append("--enable-transmit")
             with subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT,
@@ -155,6 +156,13 @@ class ModemTest(unittest.TestCase):
                 self.assertFalse((trial.directory / "rf0").is_symlink())
                 self.assertFalse((trial.directory / "rf1").is_symlink())
 
+    def configure(self, port, profile, sync, preamble):
+        self.assertEqual(port.command(0x09, profile), OK)
+        self.assertEqual(port.command(0x1B, bytes([sync])), OK)
+        self.assertEqual(port.command(0x1C, struct.pack("<H", preamble)), OK)
+
+
+class ModemTest(ModemTestCase):
     def test_runtime_directory_recovers_stale_ports_and_excludes_a_second_owner(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
@@ -165,11 +173,6 @@ class ModemTest(unittest.TestCase):
                                            capture_output=True, timeout=5)
                 self.assertNotEqual(competing.returncode, 0)
                 self.assertEqual(port.command(0x17), PONG)
-
-    def configure(self, port, profile, sync, preamble):
-        self.assertEqual(port.command(0x09, profile), OK)
-        self.assertEqual(port.command(0x1B, bytes([sync])), OK)
-        self.assertEqual(port.command(0x1C, struct.pack("<H", preamble)), OK)
 
     def test_independent_phy_configuration_and_received_frames(self):
         with self.modem(FAKE_RX="1") as trial, trial.port(0) as rf0, trial.port(1) as rf1:
@@ -193,6 +196,8 @@ class ModemTest(unittest.TestCase):
             self.assertEqual(port.command(0x09, PARIS[:-1]), b"\x06\xf1\x01")
             bad_freq = struct.pack("<IIBB", 0xFFFFFFFF, 250000, 9, 5)
             self.assertEqual(port.command(0x09, bad_freq), b"\x06\xf1\x02")
+            bad_bandwidth = struct.pack("<IIBB", 869300000, 123456, 9, 5)
+            self.assertEqual(port.command(0x09, bad_bandwidth), b"\x06\xf1\x02")
             fault = struct.pack("<IIBB", 868800000, 250000, 9, 5)
             self.assertEqual(port.command(0x09, fault), b"\x06\xf1\x03")
             self.assertEqual(port.command(0x0B), b"\x06\x8b" + PARIS)
@@ -350,6 +355,37 @@ class ModemTest(unittest.TestCase):
             self.assertEqual(port.command(0x17), PONG)
             self.assertEqual(port.command(0x11), VERSION)
 
+    def test_partial_frames_are_isolated_by_port(self):
+        with self.modem() as trial, trial.port(0) as rf0, trial.port(1) as rf1:
+            rf0.write(FEND + b"\x06\x17" + FEND + b"\x06")
+            self.assertEqual(rf0.event(), PONG)
+            self.assertEqual(rf1.command(0x11), VERSION)
+            rf0.write(b"\x17" + FEND)
+            self.assertEqual(rf0.event(), PONG)
+
+
+class DriverModemTest(ModemTestCase):
+    def test_profiles_airtime_and_transmission_through_production_driver(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            device = directory / "spi"
+            device.touch()
+            radio = dict(IDLE="1", FAKE_DUAL_RX="1", FAKE_DUAL_TX="1", FAKE_SINGLE_TX="1")
+            with self.modem(directory=directory, device=device, **radio) as trial, \
+                    trial.port(0) as rf0, trial.port(1) as rf1:
+                self.configure(rf0, PARIS, 0x2B, 16)
+                self.configure(rf1, NARROW, 0x12, 16)
+                invalid = struct.pack("<IIBB", 869618000, 123456, 8, 8)
+                self.assertEqual(rf1.command(0x09, invalid), b"\x06\xf1\x02")
+                self.assertEqual(rf1.command(0x0B), b"\x06\x8b" + NARROW)
+                self.assertEqual(rf1.command(0x0F, b"\x20"), b"\x06\x8f" + struct.pack("<I", 411))
+
+                rf1.send(b"\x00" + b"\xc0\xdb" * 16)
+                self.assertEqual(rf1.event(), TX_OK)
+                self.assertEqual(rf0.command(0x0B), b"\x06\x8b" + PARIS)
+                self.assertEqual(rf1.command(0x0B), b"\x06\x8b" + NARROW)
+                self.assertEqual(rf0.command(0x0E), b"\x06\x8e\x00")
+
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(defaultTest="ModemTest")

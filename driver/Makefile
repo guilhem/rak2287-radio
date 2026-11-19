@@ -6,7 +6,7 @@ CPPFLAGS += -I$(HAL)/libloragw/inc -I$(USP_RADIO)
 CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -Wall -Wextra -Werror
 HAL_LIBS = $(HAL)/libloragw/libloragw.a $(HAL)/libtools/libtinymt32.a -lrt -lm
-OBJS = sx1250_rx.o sx1250_board.o sx1250_usp.o usp_sx126x.o
+OBJS = sx1250_rx.o sx1250_lora.o sx1250_board.o sx1250_usp.o usp_sx126x.o
 
 all: sx1250-rx libsx1250_rx.a
 # Explicit opt-in. The ordinary receiver does not link the TX implementation.
@@ -25,7 +25,8 @@ sx1250-tx-probe sx1250-tx-warm-probe: examples/tx_probe.o libsx1250_tx.a libsx12
 examples/tx_probe.o: sx1250_rx.h sx1250_tx.h sx1250_tx_handoff.h
 gfsk_rx: examples/gfsk_rx.c sx1250_board.o sx1250_io.h sx1250_packet.h sx1250_rx.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< sx1250_board.o $(HAL_LIBS) $(LDLIBS)
-$(OBJS): sx1250_io.h sx1250_board.h
+sx1250_rx.o sx1250_board.o sx1250_usp.o: sx1250_io.h sx1250_board.h
+sx1250_lora.o: sx1250_board.h sx1250_lora.h sx1250_rx.h
 sx1250_rx.o: sx1250_dual.h sx1250_packet.h sx1250_lora.h sx1250_rx_internal.h sx1250_usp.h
 sx1250_usp.o: sx1250_usp.h $(USP_RADIO)/sx126x_hal.h
 usp_sx126x.o: $(USP_RADIO)/sx126x.c $(USP_RADIO)/sx126x.h $(USP_RADIO)/sx126x_hal.h

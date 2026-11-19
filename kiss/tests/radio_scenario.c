@@ -8,20 +8,12 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "sx1250_board.h"
 #include "sx1250_dual.h"
 #include "sx1250_tx.h"
 
 static struct sx1250_rx_config active[2];
 static bool configured[2], delivered[2];
 static atomic_bool receiving;
-
-bool sx1250_lora_profile_valid(const struct sx1250_rx_config *profile) {
-    return profile && sx1250_image_band(profile->frequency_hz) &&
-           profile->bandwidth_hz && profile->spreading_factor >= 5 && profile->spreading_factor <= 12 &&
-           profile->coding_rate >= 5 && profile->coding_rate <= 8 &&
-           profile->preamble_symbols >= (profile->spreading_factor <= 6 ? 12 : 8);
-}
 
 int sx1250_dual_open(const char *path, const struct sx1250_rx_config profiles[2]) {
     assert(!strcmp(path, "/simulated-spi"));

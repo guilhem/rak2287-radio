@@ -21,7 +21,8 @@ def build(hal, usp_radio, tmp):
     for path, opts in [
         (src / "loragw_sx1302.c", []), (src / "loragw_sx1250.c", []),
         (src / "sx1250_spi.c", ["-Dioctl=bench_ioctl"]),
-        (DRIVER / "sx1250_board.c", []), (DRIVER / "sx1250_rx.c", clocks),
+        (DRIVER / "sx1250_board.c", []), (DRIVER / "sx1250_lora.c", []),
+        (DRIVER / "sx1250_rx.c", clocks),
         (DRIVER / "sx1250_usp.c", []), (usp_radio / "sx126x.c", []),
         (DRIVER / "sx1250_tx.c", clocks),
         (DRIVER / "tests/fake_hal.c", ["-DHANDOVER_BENCH"]),

@@ -15,11 +15,11 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "codec.h"
 #include "sx1250_dual.h"
 #include "sx1250_tx.h"
 
 enum { N_PORTS = 2, TX_WAIT_MS = 2000, TX_MARGIN_MS = 500, MAX_PACKET = 255 };
-enum { FEND = 0xc0, FESC = 0xdb, TFEND = 0xdc, TFESC = 0xdd };
 enum { DATA = 0x00, TX_DELAY = 0x01, SET_HARDWARE = 0x06 };
 enum {
     SET_RADIO = 0x09, SET_TX_POWER, GET_RADIO, GET_TX_POWER,
@@ -30,7 +30,11 @@ enum {
     OK = 0xf0, ERROR, TX_DONE = 0xf8, RX_META,
 };
 enum { BAD_LENGTH = 1, BAD_PARAMETER, UNAVAILABLE, UNKNOWN_COMMAND = 5, TX_BUSY = 7 };
-enum { MAX_CONTROL_BYTES = 64, TX_DONE_BYTES = 7 };
+enum {
+    MAX_CONTROL_PAYLOAD = 30,
+    MAX_CONTROL_BYTES = KISS_ENCODED_MAX(MAX_CONTROL_PAYLOAD),
+    TX_DONE_BYTES = KISS_ENCODED_MAX(2),
+};
 
 struct port {
     const char *name;
@@ -41,9 +45,9 @@ struct port {
     int8_t power_dbm;
     uint16_t preamble_override;
     uint32_t received, sent, tx_errors;
-    uint8_t input[256], frame[512], output[4096];
-    size_t input_start, input_end, frame_size, output_start, output_end;
-    bool in_frame, escaped;
+    uint8_t input[256], output[4096];
+    size_t input_start, input_end, output_start, output_end;
+    struct kiss_decoder decoder;
     uint8_t pending[MAX_PACKET];
     size_t pending_size;
     int8_t pending_power_dbm;
@@ -117,8 +121,9 @@ static int open_port(struct port *port, int directory) {
 }
 
 static void disconnect(struct port *port) {
-    port->connected = port->in_frame = port->escaped = false;
-    port->input_start = port->input_end = port->frame_size = 0;
+    port->connected = false;
+    port->decoder = (struct kiss_decoder){0};
+    port->input_start = port->input_end = 0;
     port->output_start = port->output_end = port->pending_size = 0;
     tcflush(port->fd, TCIOFLUSH);
 }
@@ -127,31 +132,23 @@ static size_t output_room(const struct port *port) {
     return sizeof port->output - (port->output_end - port->output_start);
 }
 
-static void encode(struct port *port, uint8_t type, const uint8_t *payload, size_t length) {
-    if (port->output_end + 2 * length + 3 > sizeof port->output) {
+static void queue_frame(struct port *port, uint8_t type, const uint8_t *payload, size_t length) {
+    if (sizeof port->output - port->output_end < KISS_ENCODED_MAX(length)) {
         port->output_end -= port->output_start;
         memmove(port->output, port->output + port->output_start, port->output_end);
         port->output_start = 0;
     }
-    uint8_t *out = port->output + port->output_end;
-    *out++ = FEND;
-    *out++ = type;
-    for (size_t i = 0; i < length; ++i) {
-        const uint8_t byte = payload[i];
-        if (byte == FEND || byte == FESC) {
-            *out++ = FESC;
-            *out++ = byte == FEND ? TFEND : TFESC;
-        } else *out++ = byte;
-    }
-    *out++ = FEND;
-    port->output_end = (size_t)(out - port->output);
+    size_t encoded = kiss_encode_frame(port->output + port->output_end,
+                                       sizeof port->output - port->output_end, type, payload, length);
+    if (!encoded) abort();
+    port->output_end += encoded;
 }
 
 static void reply(struct port *port, uint8_t subcommand, const void *data, size_t length) {
-    uint8_t payload[(MAX_CONTROL_BYTES - 3) / 2] = {subcommand};
+    uint8_t payload[MAX_CONTROL_PAYLOAD] = {subcommand};
     if (length >= sizeof payload) abort();
     if (length) memcpy(payload + 1, data, length);
-    encode(port, SET_HARDWARE, payload, length + 1);
+    queue_frame(port, SET_HARDWARE, payload, length + 1);
 }
 
 static void send_error(struct port *port, uint8_t code) { reply(port, ERROR, &code, 1); }
@@ -301,17 +298,17 @@ static void hardware_command(unsigned rf, const uint8_t *command, size_t length)
     }
 }
 
-static void handle_frame(unsigned rf, size_t length, bool allow_tx, int64_t now) {
+static void handle_frame(unsigned rf, const uint8_t *frame, size_t length, bool allow_tx, int64_t now) {
     struct port *port = &ports[rf];
     const size_t size = length - 1;
-    switch (port->frame[0]) {
+    switch (frame[0]) {
     case DATA:
         if (size == 0 || size > MAX_PACKET) send_error(port, BAD_LENGTH);
         else if (port->pending_size || (transmission.active && transmission.rf == rf))
             send_error(port, TX_BUSY);
         else if (!allow_tx || !port->configured) tx_done(port, 0);
         else {
-            memcpy(port->pending, port->frame + 1, size);
+            memcpy(port->pending, frame + 1, size);
             port->pending_size = size;
             port->pending_power_dbm = port->power_dbm;
             port->earliest_tx = now + port->tx_delay_ms;
@@ -319,36 +316,12 @@ static void handle_frame(unsigned rf, size_t length, bool allow_tx, int64_t now)
         }
         break;
     case TX_DELAY:
-        if (size == 1) port->tx_delay_ms = 10U * port->frame[1];
+        if (size == 1) port->tx_delay_ms = 10U * frame[1];
         break;
     case SET_HARDWARE:
-        hardware_command(rf, port->frame + 1, size);
+        hardware_command(rf, frame + 1, size);
         break;
     }
-}
-
-static void decode_byte(unsigned rf, uint8_t byte, bool allow_tx, int64_t now) {
-    struct port *port = &ports[rf];
-    if (byte == FEND) {
-        if (port->in_frame && !port->escaped && port->frame_size)
-            handle_frame(rf, port->frame_size, allow_tx, now);
-        port->in_frame = true;
-        port->escaped = false;
-        port->frame_size = 0;
-        return;
-    }
-    if (!port->in_frame) return;
-    if (port->escaped) {
-        port->escaped = false;
-        if (byte == TFEND) byte = FEND;
-        else if (byte == TFESC) byte = FESC;
-        else { port->in_frame = false; return; }
-    } else if (byte == FESC) {
-        port->escaped = true;
-        return;
-    }
-    if (port->frame_size == sizeof port->frame) port->in_frame = false;
-    else port->frame[port->frame_size++] = byte;
 }
 
 static int flush_port(struct port *port) {
@@ -379,8 +352,10 @@ static int service_port(unsigned rf, short events, bool allow_tx, int64_t now) {
         }
     }
     while (port->input_start < port->input_end &&
-           output_room(port) >= MAX_CONTROL_BYTES + TX_DONE_BYTES)
-        decode_byte(rf, port->input[port->input_start++], allow_tx, now);
+           output_room(port) >= MAX_CONTROL_BYTES + TX_DONE_BYTES) {
+        size_t length = kiss_decode_byte(&port->decoder, port->input[port->input_start++]);
+        if (length) handle_frame(rf, port->decoder.frame, length, allow_tx, now);
+    }
     return 0;
 }
 
@@ -395,11 +370,11 @@ static int forward_rx(unsigned rf) {
     if (rc <= 0) return rc;
     if (!port->connected || !port->configured) return 0;
     ++port->received;
-    const size_t metadata = port->signal_report ? 9 : 0;
+    const size_t metadata = port->signal_report ? KISS_ENCODED_MAX(3) : 0;
     /* Reserve space for a control reply and a pending TX's final status. */
-    if (output_room(port) < 2U * packet.size + 3 + metadata + MAX_CONTROL_BYTES + TX_DONE_BYTES)
+    if (output_room(port) < KISS_ENCODED_MAX(packet.size) + metadata + MAX_CONTROL_BYTES + TX_DONE_BYTES)
         return 0;
-    encode(port, DATA, packet.payload, packet.size);
+    queue_frame(port, DATA, packet.payload, packet.size);
     if (port->signal_report) {
         uint8_t metrics[] = {signed_byte(packet.snr_db * 4), signed_byte(packet.rssi_dbm)};
         reply(port, RX_META, metrics, sizeof metrics);
