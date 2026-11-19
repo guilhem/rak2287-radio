@@ -61,7 +61,9 @@ Use `sx1250_dual_reconfigure()` to retune one receiver while the other
 listens. `EAGAIN` means the selected chain is receiving or has a packet
 pending. Poll the packet before retrying.
 
-To transmit, pass a transmit profile and frame to `sx1250_dual_send()`.
+Use `sx1250_dual_send()` to transmit at the board's default power. To
+select a specific level, check it with `sx1250_tx_power_supported()` and
+pass it to `sx1250_dual_send_with_power()` along with the profile and frame.
 The driver defers when either radio has a pending reception. A completed
 send reports RF0 TxDone and verifies that both receivers returned to
 their current profiles. Retry only an explicit `EAGAIN`. The calling

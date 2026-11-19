@@ -38,6 +38,7 @@ struct port {
     bool published, connected, configured, signal_report;
     unsigned tx_delay_ms;
     struct sx1250_rx_config profile;
+    int8_t power_dbm;
     uint16_t preamble_override;
     uint32_t received, sent, tx_errors;
     uint8_t input[256], frame[512], output[4096];
@@ -45,6 +46,7 @@ struct port {
     bool in_frame, escaped;
     uint8_t pending[MAX_PACKET];
     size_t pending_size;
+    int8_t pending_power_dbm;
     int64_t earliest_tx, tx_deadline;
 };
 
@@ -56,6 +58,7 @@ static struct transmission {
     unsigned rf, timeout_ms;
     uint32_t airtime_ms;
     struct sx1250_rx_config profile;
+    int8_t power_dbm;
     uint8_t payload[MAX_PACKET];
     size_t size;
     struct sx1250_handoff_report report;
@@ -227,11 +230,14 @@ static void hardware_command(unsigned rf, const uint8_t *command, size_t length)
         apply_profile(rf, profile, preamble, op == SET_RADIO);
         return;
     }
-    case SET_TX_POWER:
+    case SET_TX_POWER: {
         if (!expect(port, size, 1)) return;
-        if (data[0] == (uint8_t)SX1250_RF0_TX_SETTING_DBM) reply(port, OK, NULL, 0);
-        else send_error(port, BAD_PARAMETER);
+        const int8_t power_dbm = data[0] <= INT8_MAX ? data[0] : (int)data[0] - (UINT8_MAX + 1);
+        if (!sx1250_tx_power_supported(power_dbm)) { send_error(port, BAD_PARAMETER); return; }
+        port->power_dbm = power_dbm;
+        reply(port, OK, NULL, 0);
         return;
+    }
     case SET_SIGNAL_REPORT:
         if (!expect(port, size, 1)) return;
         port->signal_report = data[0] != 0;
@@ -259,7 +265,7 @@ static void hardware_command(unsigned rf, const uint8_t *command, size_t length)
         reply(port, op | 0x80, out, 3);
         break;
     case GET_TX_POWER:
-        out[0] = (uint8_t)SX1250_RF0_TX_SETTING_DBM;
+        out[0] = (uint8_t)port->power_dbm;
         reply(port, op | 0x80, out, 1);
         break;
     case GET_SIGNAL_REPORT:
@@ -308,6 +314,7 @@ static void handle_frame(unsigned rf, size_t length, bool allow_tx, int64_t now)
         else {
             memcpy(port->pending, port->frame + 1, size);
             port->pending_size = size;
+            port->pending_power_dbm = port->power_dbm;
             port->earliest_tx = now + port->tx_delay_ms;
             port->tx_deadline = port->earliest_tx + TX_WAIT_MS;
         }
@@ -403,8 +410,8 @@ static int forward_rx(unsigned rf) {
 
 static void *send_on_rf0(void *data) {
     struct transmission *job = data;
-    job->result = sx1250_dual_send(&job->profile, job->payload, job->size,
-                                   job->timeout_ms, &job->report);
+    job->result = sx1250_dual_send_with_power(&job->profile, job->power_dbm, job->payload, job->size,
+                                             job->timeout_ms, &job->report);
     job->error = job->result < 0 ? errno : 0;
     return NULL;
 }
@@ -469,6 +476,7 @@ static int schedule_tx(unsigned turn, int64_t next_tx, int64_t now) {
         if (busy) return busy > 0 ? 0 : -1;
         transmission = (struct transmission){
             .rf = rf, .profile = port->profile, .size = port->pending_size,
+            .power_dbm = port->pending_power_dbm,
             .airtime_ms = airtime, .timeout_ms = 2 * airtime + TX_MARGIN_MS,
         };
         if (transmission.timeout_ms > SX1250_TX_TIMEOUT_MAX_MS)
@@ -559,6 +567,7 @@ int main(int argc, char **argv) {
             .spreading_factor = 7, .coding_rate = 5, .sync_word = 0x12, .require_crc = true,
         };
         ports[i].profile = profiles[i];
+        ports[i].power_dbm = SX1250_RF0_TX_SETTING_DBM;
         ports[i].signal_report = true;
         if (open_port(&ports[i], directory)) { perror("open KISS port"); goto cleanup; }
     }

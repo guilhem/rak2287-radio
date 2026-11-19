@@ -10,7 +10,7 @@ From this checkout on Linux, use GNU Make, a C compiler and Python 3.
 make -j2 kiss-check
 ```
 
-The tests configure two serial ports on a simulated modem, receive raw packets with RSSI and SNR, and submit overlapping send requests. The simulated radio handles the sends in sequence. The test runner reports `OK` on success.
+The tests configure two serial ports on a simulated modem, receive raw packets with RSSI and SNR, and submit overlapping send requests. The simulated radio handles the sends in sequence with the power selected on each port when it queued the frame. The test runner reports `OK` on success.
 
 ## Listen with a RAK2287
 
@@ -33,13 +33,15 @@ The modem uses the LoRa radio commands from MeshCore KISS with the Mesh KISS v2 
 | --- | --- |
 | `SetRadio` / `GetRadio` | Center frequency and bandwidth in Hz, spreading factor and coding rate denominator. The [driver's ranges](driver/sx1250_rx.h) apply. |
 | `SetSyncWord`, `SetPreamble`, `GetPhyExtra` | Sync word and preamble length in symbols. A zero preamble selects 32 symbols through SF8 and 16 above SF8. |
-| `SetTxPower` / `GetTxPower` | RF0 uses a fixed nominal chip setting of −9 dBm (signed byte `0xf7`). Other requests return `InvalidParam`. Output power at the board connector is uncalibrated. |
+| `SetTxPower` / `GetTxPower` | Select and read back a signed dBm setting on this port. The modem saves it with each new Data request. An unsupported setting returns `InvalidParam`. |
 | `Data`, `SetSignalReport`, `RxMeta` | Raw LoRa packets and optional RX metadata. By default each forwarded packet includes RSSI in dBm and SNR in quarter dB. |
 | `Data`, `TxDone` | Queue one send per port. A successful `TxDone` means RF0 completed transmission and both receive chains rearmed. |
 
 `IsChannelBusy` reports observed packet reception on either chain or an RF0 handoff in progress. `Ping`, `GetVersion`, `GetDeviceName`, `GetStats` and `GetAirtime` support modem queries. The serial `TXDELAY` command sets the minimum wait before a request can start. [MeshCore modem commands](https://github.com/meshcore-dev/MeshCore/blob/75b04ef06def54b348400cb1b138afb6749ffd4f/docs/kiss_modem_protocol.md) · [Mesh KISS v2 additions](https://github.com/ScotMesh/RepeaterTastic/blob/768a030998b8e3cac18e059bb6eb2a73ad4d1dc6/firmware/0001-kiss-modem-sync-word-preamble.patch)
 
-Clients that automatically apply a power setting must be able to send the signed setting above. The tested RepeaterTastic profile resolver replaces nonpositive requests with the region default. The tested openHop wrapper packs power as an unsigned byte. These limits affect automatic configuration in both stock applications. [RepeaterTastic profile resolution](https://github.com/ScotMesh/RepeaterTastic/blob/768a030998b8e3cac18e059bb6eb2a73ad4d1dc6/internal/phy/phy.go#L193-L198) · [openHop KISS wrapper](https://github.com/openhop-dev/openhop_core/blob/e07722ea96093752ac8b3c6772d653f8b68224bf/src/openhop_core/hardware/kiss_modem_wrapper.py#L1206-L1218)
+Both hardware ports start at −9 dBm (signed byte `0xf7`), the only nominal chip setting enabled by the hardware driver's power table. Connector power at this setting is uncalibrated. Further hardware levels need conducted measurements on this RF path before being added to the table. The simulated modem offers test levels of +8 and +14 dBm.
+
+Clients that automatically apply a power setting must be able to send a supported signed value. The tested RepeaterTastic profile resolver replaces nonpositive requests with the region default. The tested openHop wrapper packs power as an unsigned byte. These limits affect automatic configuration in both stock applications. [RepeaterTastic profile resolution](https://github.com/ScotMesh/RepeaterTastic/blob/768a030998b8e3cac18e059bb6eb2a73ad4d1dc6/internal/phy/phy.go#L193-L198) · [openHop KISS wrapper](https://github.com/openhop-dev/openhop_core/blob/e07722ea96093752ac8b3c6772d653f8b68224bf/src/openhop_core/hardware/kiss_modem_wrapper.py#L1206-L1218)
 
 ## Shared transmission
 

@@ -82,10 +82,16 @@ uint32_t sx1250_lora_airtime_ms(const struct sx1250_rx_config *profile, uint8_t 
     return (uint32_t)((preamble_chips * 1000 + profile->bandwidth_hz - 1) / profile->bandwidth_hz);
 }
 
-int sx1250_dual_send(const struct sx1250_rx_config *profile, const uint8_t *payload, size_t length,
-                     unsigned timeout, struct sx1250_handoff_report *report) {
+bool sx1250_tx_power_supported(int8_t power_dbm) {
+    /* Exercise per-port settings with two additional simulated levels. */
+    return power_dbm == SX1250_RF0_TX_SETTING_DBM || power_dbm == 8 || power_dbm == 14;
+}
+
+int sx1250_dual_send_with_power(const struct sx1250_rx_config *profile, int8_t power_dbm,
+                                const uint8_t *payload, size_t length, unsigned timeout,
+                                struct sx1250_handoff_report *report) {
     assert(receiving && timeout >= 500 && length > 0);
-    if (timeout > SX1250_TX_TIMEOUT_MAX_MS) {
+    if (timeout > SX1250_TX_TIMEOUT_MAX_MS || !sx1250_tx_power_supported(power_dbm)) {
         *report = (struct sx1250_handoff_report){0};
         errno = EINVAL;
         return -1;
@@ -95,9 +101,9 @@ int sx1250_dual_send(const struct sx1250_rx_config *profile, const uint8_t *payl
         return -1;
     }
     receiving = false;
-    fprintf(stderr, "SET_TX hz=%u bw=%u sf=%u cr=%u sync=%02x preamble=%u payload=",
+    fprintf(stderr, "SET_TX hz=%u bw=%u sf=%u cr=%u sync=%02x preamble=%u power_dbm=%d payload=",
             profile->frequency_hz, profile->bandwidth_hz, profile->spreading_factor,
-            profile->coding_rate, profile->sync_word, profile->preamble_symbols);
+            profile->coding_rate, profile->sync_word, profile->preamble_symbols, power_dbm);
     for (size_t i = 0; i < length; ++i) fprintf(stderr, "%02x", payload[i]);
     fputc('\n', stderr);
     const char *gate = getenv("FAKE_TX_IN_FLIGHT");

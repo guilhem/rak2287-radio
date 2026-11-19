@@ -90,6 +90,11 @@ int main(int argc, char **argv) {
     uint8_t sent[255];
 
     assert(!sx1250_rx_open(argv[1], &profile));
+    assert(sx1250_tx_power_supported(SX1250_RF0_TX_SETTING_DBM));
+    assert(!sx1250_tx_power_supported(22));
+    assert(sx1250_dual_send_with_power(&profile, 22, payload, sizeof payload, 100, &report) == -1 &&
+           errno == EINVAL);
+    assert(!pauses && !resumes && !report.tx_started && !strcmp(report.failed_stage, "validate"));
     assert(sx1250_dual_send(&profile, payload, 0, 100, &report) == -1 && errno == EINVAL);
     assert(!pauses && !resumes && !report.tx_started);
     busy = true;

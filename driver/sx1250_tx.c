@@ -17,6 +17,23 @@ static const bool radio_verbose = false;
 
 enum { tx_radio = 0, tx_done = 1, timer_irq = 0x200 };
 
+/* Add levels once their output at the connector has been measured with this PA setting. */
+static const struct rf0_power_level {
+    int8_t power_dbm, chip_setting;
+} rf0_power_levels[] = {
+    {SX1250_RF0_TX_SETTING_DBM, SX1250_RF0_TX_SETTING_DBM},
+};
+
+static const struct rf0_power_level *find_rf0_power(int8_t power_dbm) {
+    for (size_t i = 0; i < sizeof rf0_power_levels / sizeof *rf0_power_levels; ++i)
+        if (rf0_power_levels[i].power_dbm == power_dbm) return &rf0_power_levels[i];
+    return NULL;
+}
+
+bool sx1250_tx_power_supported(int8_t power_dbm) {
+    return find_rf0_power(power_dbm) != NULL;
+}
+
 static void stage(struct sx1250_handoff_report *report, const char *name) {
     if (report) report->failed_stage = name;
 }
@@ -83,7 +100,7 @@ static bool clock_counter_running(void) {
 static int64_t now_ns(void);
 #include "sx1250_tx_warm_impl.h"
 
-static int configure_rf0_tx(const struct sx1250_rx_config *c, uint8_t length,
+static int configure_rf0_tx(const struct sx1250_rx_config *c, uint8_t length, int8_t chip_power,
                             struct sx1250_handoff_report *report) {
     uint32_t frf = SX1250_FREQ_TO_REG(c->frequency_hz);
     uint8_t f[] = {frf >> 24, frf >> 16, frf >> 8, frf}, actual[4], clamp, quality;
@@ -96,8 +113,7 @@ static int configure_rf0_tx(const struct sx1250_rx_config *c, uint8_t length,
      * stage and FEM bypass on this board have no autonomous-mode calibration. */
     stage(report, "rf0-low-output-pa");
     return bank_write(tx_radio, SET_PA_CONFIG, (uint8_t[]){2, 2, 0, 1}, 4, 3) ||
-           bank_write(tx_radio, SET_TX_PARAMS,
-                      (uint8_t[]){(uint8_t)SX1250_RF0_TX_SETTING_DBM, SET_RAMP_200U}, 2, 3) ||
+           bank_write(tx_radio, SET_TX_PARAMS, (uint8_t[]){(uint8_t)chip_power, SET_RAMP_200U}, 2, 3) ||
            bank_read(tx_radio, READ_REGISTER, (uint8_t[]){8, 0xd8}, 2, &clamp, 1) ||
            bank_write(tx_radio, WRITE_REGISTER, (uint8_t[]){8, 0xd8, clamp | 0x1e}, 3, 3) ||
            bank_read(tx_radio, READ_REGISTER, (uint8_t[]){8, 0x89}, 2, &quality, 1) ||
@@ -137,7 +153,7 @@ static int prepare_rf0(const struct sx1250_rx_config *c, uint8_t length, uint8_t
         bank_write(tx_radio, CALIBRATE, (uint8_t[]){0x7f}, 1, 2) ||
         sx1250_calibrate(tx_radio, c->frequency_hz) ||
         bank_write(tx_radio, SET_STANDBY, (uint8_t[]){STDBY_XOSC}, 1, 3)) return -1;
-    return configure_rf0_tx(c, length, report);
+    return configure_rf0_tx(c, length, SX1250_RF0_TX_SETTING_DBM, report);
 }
 
 static int fill_fifo(const uint8_t *data, size_t length) {
@@ -298,11 +314,13 @@ int sx1250_tx_send(const uint8_t *payload, size_t length, unsigned timeout_ms) {
     return sx1250_tx_send_report(payload, length, timeout_ms, NULL);
 }
 
-int sx1250_dual_send(const struct sx1250_rx_config *profile, const uint8_t *payload, size_t length,
-                     unsigned timeout_ms, struct sx1250_handoff_report *report) {
+int sx1250_dual_send_with_power(const struct sx1250_rx_config *profile, int8_t power_dbm,
+                                const uint8_t *payload, size_t length, unsigned timeout_ms,
+                                struct sx1250_handoff_report *report) {
     if (report) *report = (struct sx1250_handoff_report){0};
     stage(report, "validate");
-    if (!sx1250_lora_profile_valid(profile) || !valid_tx(profile, payload, length, timeout_ms)) {
+    const struct rf0_power_level *power = find_rf0_power(power_dbm);
+    if (!power || !sx1250_lora_profile_valid(profile) || !valid_tx(profile, payload, length, timeout_ms)) {
         errno = EINVAL;
         return -1;
     }
@@ -316,7 +334,7 @@ int sx1250_dual_send(const struct sx1250_rx_config *profile, const uint8_t *payl
     bool saved_valid = !pa_off() && !lnas(0) &&
         !snapshot(bridge_spans, SPANS(bridge_spans), saved);
     /* Both banks are already in packet mode and calibrated for this EU band. */
-    int err = !saved_valid || configure_rf0_tx(profile, length, report) ? EIO :
+    int err = !saved_valid || configure_rf0_tx(profile, length, power->chip_setting, report) ? EIO :
         load_and_send(payload, length, timeout_ms, false, report);
 
     bool force_cold = false;
@@ -348,6 +366,12 @@ int sx1250_dual_send(const struct sx1250_rx_config *profile, const uint8_t *payl
     }
     if (err) { errno = err; return -1; }
     return 0;
+}
+
+int sx1250_dual_send(const struct sx1250_rx_config *profile, const uint8_t *payload, size_t length,
+                     unsigned timeout_ms, struct sx1250_handoff_report *report) {
+    return sx1250_dual_send_with_power(profile, SX1250_RF0_TX_SETTING_DBM, payload, length,
+                                      timeout_ms, report);
 }
 
 int sx1250_tx_probe_handoff(const uint8_t *payload, size_t length, unsigned timeout_ms,

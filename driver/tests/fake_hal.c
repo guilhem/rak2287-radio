@@ -23,7 +23,7 @@ static unsigned tx_mode, tx_type, tx_irq, tx_size;
 static uint8_t tx_regs[65536], tx_fifo[256], sent[255], sent_size;
 static uint8_t injected[255], injected_size;
 static uint8_t rf0_rx[255], rf0_rx_size, rf0_rx_cr;
-static bool restoring, tx_started;
+static bool restoring, tx_started, tx_params_set;
 static unsigned tx_commands;
 static bool injected_warm_fault;
 
@@ -144,19 +144,25 @@ static int tx_write(sx1250_op_code_t op, uint8_t *p, uint16_t n) {
         tx_size = p[3]; break;
     case SET_PA_CONFIG:
         assert(n == 4 && p[0] == 2 && p[1] == 2 && !p[2] && p[3] == 1);
+        tx_params_set = false;
 #ifdef HANDOVER_BENCH
         tx_regs[0x08e7] = 0xa7; /* Synthetic OCP side effect, not a silicon value. */
 #else
         if (dual_rx) tx_regs[0x08e7] = 0xa7;
 #endif
         break;
-    case SET_TX_PARAMS: assert(n == 2 && (int8_t)p[0] == -9 && p[1] == SET_RAMP_200U); break;
+    case SET_TX_PARAMS:
+        assert(n == 2 && p[0] == 0xf7 && p[1] == SET_RAMP_200U);
+        tx_params_set = true;
+        break;
     case SET_BUFFER_BASE_ADDRESS: case SET_DIO_IRQ_PARAMS: break;
     case CLR_IRQ_STATUS: tx_irq &= ~((p[0] << 8) | p[1]); break;
     case WRITE_BUFFER: assert((size_t)p[0] + n - 1 <= sizeof tx_fifo);
         memcpy(tx_fifo + p[0], p + 1, n - 1); break;
     case SET_TX:
         assert(!getenv("FAKE_FORBID_TX") && (!dual_rx || getenv("FAKE_DUAL_TX")));
+        assert(tx_params_set);
+        tx_params_set = false;
         ++tx_commands;
         assert(!getenv("FAKE_SINGLE_TX") || tx_commands == 1);
         assert(n == 3 && (p[0] || p[1] || p[2]) && tx_mode == 3 && mode == 3 && tx_size);
@@ -248,7 +254,7 @@ void *lgw_com_target(void) {
 int lgw_connect(lgw_com_type_t t, const char *p) {
     assert(t == LGW_COM_SPI && p);
     connected = true; regs[0x0587] = 0x20; arms = 0; irq = 0; sent_size = injected_size = rf0_rx_size = 0;
-    restoring = tx_started = false; memset(lines, 0, sizeof lines);
+    restoring = tx_started = tx_params_set = false; memset(lines, 0, sizeof lines);
     rf1_rearm_failures = 0;
     tx_commands = 0;
     injected_warm_fault = false;

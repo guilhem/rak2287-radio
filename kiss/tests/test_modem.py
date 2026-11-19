@@ -196,9 +196,6 @@ class ModemTest(unittest.TestCase):
             fault = struct.pack("<IIBB", 868800000, 250000, 9, 5)
             self.assertEqual(port.command(0x09, fault), b"\x06\xf1\x03")
             self.assertEqual(port.command(0x0B), b"\x06\x8b" + PARIS)
-            self.assertEqual(port.command(0x0A, b"\x16"), b"\x06\xf1\x02")
-            self.assertEqual(port.command(0x0A, b"\xf7"), OK)
-            self.assertEqual(port.command(0x0C), b"\x06\x8c\xf7")
 
     def test_both_ports_share_rf0_using_their_own_profiles(self):
         payload = b"\x22\xc0\xdb" * 85
@@ -215,8 +212,39 @@ class ModemTest(unittest.TestCase):
             self.assertEqual(rf0.command(0x0B), b"\x06\x8b" + PARIS)
             self.assertEqual(rf1.command(0x0B), b"\x06\x8b" + NARROW)
         self.assertCountEqual(trial.tx_calls, [
-            f"SET_TX hz=869300000 bw=250000 sf=9 cr=5 sync=2b preamble=16 payload={payload.hex()}",
-            "SET_TX hz=869618000 bw=62500 sf=8 cr=8 sync=12 preamble=32 payload=11",
+            f"SET_TX hz=869300000 bw=250000 sf=9 cr=5 sync=2b preamble=16 power_dbm=-9 payload={payload.hex()}",
+            "SET_TX hz=869618000 bw=62500 sf=8 cr=8 sync=12 preamble=32 power_dbm=-9 payload=11",
+        ])
+
+    def test_transmit_power_is_per_port_and_fixed_at_submission(self):
+        with self.modem(hold_tx=True) as trial, trial.port(0) as rf0, trial.port(1) as rf1:
+            self.assertEqual(rf0.command(0x0C), b"\x06\x8c\xf7")
+            self.assertEqual(rf1.command(0x0C), b"\x06\x8c\xf7")
+            self.assertEqual(rf0.command(0x0A, b"\x16"), b"\x06\xf1\x02")
+            self.assertEqual(rf0.command(0x0C), b"\x06\x8c\xf7")
+            self.assertEqual(rf1.command(0x0C), b"\x06\x8c\xf7")
+
+            self.configure(rf0, PARIS, 0x2B, 16)
+            self.configure(rf1, NARROW, 0x12, 32)
+            self.assertEqual(rf0.command(0x0A, b"\x08"), OK)
+            self.assertEqual(rf1.command(0x0A, b"\x0e"), OK)
+            rf0.send(b"\x00\x22")
+            rf1.send(b"\x00\x11")
+            self.assertEqual(rf0.command(0x0C), b"\x06\x8c\x08")
+            self.assertEqual(rf1.command(0x0C), b"\x06\x8c\x0e")
+            self.assertEqual(rf0.command(0x0A, b"\xf7"), OK)
+            self.assertEqual(rf0.command(0x0C), b"\x06\x8c\xf7")
+            self.assertEqual(rf1.command(0x0C), b"\x06\x8c\x0e")
+
+            trial.gate.touch()
+            self.assertEqual(rf0.event(), TX_OK)
+            self.assertEqual(rf1.event(), TX_OK)
+            rf0.send(b"\x00\x33")
+            self.assertEqual(rf0.event(), TX_OK)
+        self.assertCountEqual(trial.tx_calls, [
+            "SET_TX hz=869300000 bw=250000 sf=9 cr=5 sync=2b preamble=16 power_dbm=8 payload=22",
+            "SET_TX hz=869618000 bw=62500 sf=8 cr=8 sync=12 preamble=32 power_dbm=14 payload=11",
+            "SET_TX hz=869300000 bw=250000 sf=9 cr=5 sync=2b preamble=16 power_dbm=-9 payload=33",
         ])
 
     def test_receive_only_never_transmits(self):
