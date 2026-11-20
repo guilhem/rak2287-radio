@@ -87,6 +87,23 @@ static bool clock_counter_running(void) {
 static int64_t now_ns(void);
 #include "sx1250_tx_warm_impl.h"
 
+static int configure_phy(unsigned rf, const struct sx1250_rx_config *c, uint8_t payload_length) {
+    uint8_t iq, check[2], type;
+    uint8_t sync[] = {0x07, 0x40, (c->sync_word & 0xf0) | 4, (c->sync_word << 4) | 4};
+    uint8_t mod[] = {c->spreading_factor, bw_code(c->bandwidth_hz), c->coding_rate - 4, lora_ldro(c)};
+    uint8_t pkt[] = {c->preamble_symbols >> 8, c->preamble_symbols, c->implicit_length != 0,
+                     payload_length, c->require_crc, c->inverted_iq};
+    return bank_write(rf, SET_PACKET_TYPE, (uint8_t[]){PACKET_TYPE_LORA}, 1, 3) ||
+        bank_read(rf, (sx1250_op_code_t)0x11, NULL, 0, &type, 1) || type != PACKET_TYPE_LORA ||
+        bank_write(rf, SET_MODULATION_PARAMS, mod, sizeof mod, 3) ||
+        bank_write(rf, SET_PACKET_PARAMS, pkt, sizeof pkt, 3) ||
+        bank_read(rf, READ_REGISTER, (uint8_t[]){0x07,0x36}, 2, &iq, 1) ||
+        bank_write(rf, WRITE_REGISTER, (uint8_t[]){0x07, 0x36, c->inverted_iq ? iq & ~4 : iq | 4}, 3, 3) ||
+        bank_write(rf, WRITE_REGISTER, sync, sizeof sync, 3) || bank_read(rf, READ_REGISTER, (uint8_t[]){0x07,0x40}, 2, check, 2) ||
+        memcmp(check, sync + 2, 2) ||
+        bank_write(rf, SET_BUFFER_BASE_ADDRESS, (uint8_t[]){0, 0}, 2, 3);
+}
+
 static int configure_rf0_tx(const struct sx1250_rx_config *c, uint8_t length, int8_t chip_power,
                             struct sx1250_handoff_report *report) {
     uint32_t frf = SX1250_FREQ_TO_REG(c->frequency_hz);

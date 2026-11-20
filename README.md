@@ -10,7 +10,7 @@ From the repository root on Linux, use GNU Make, a C compiler and Python 3.
 make -j2 kiss-check
 ```
 
-Look for `OK` after the tests configure both ports, receive packets with RSSI and SNR, and send queued frames one at a time.
+Look for `OK` after the codec and modem tests exercise framing, independent profiles and shared transmission. To exercise the production driver through a KISS port on a simulated board, initialize `deps/hal` and `deps/usp` and run `make kiss-driver-check`. The full `make check` includes this test.
 
 ## Start the modem
 
