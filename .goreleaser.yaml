@@ -1,0 +1,101 @@
+version: 2
+project_name: sx130x-kiss
+dist: build/dist
+
+before:
+  hooks:
+    - mkdir -p build
+    - cargo about generate --locked --fail --config packaging/about.toml --output-file build/RUST-LICENSES.txt packaging/licenses.hbs
+
+builds:
+  - builder: rust
+    binary: sx130x-kiss
+    command: build
+    flags: [--release, --locked]
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+    env:
+      - CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+      - AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+      - CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+
+archives:
+  - formats: [tar.gz]
+    files:
+      - src: packaging/sx130x-kiss.service
+        strip_parent: true
+      - src: LICENSE
+        dst: licenses
+        strip_parent: true
+      - src: NOTICE.md
+        dst: licenses
+        strip_parent: true
+      - src: driver/licenses/*.txt
+        dst: licenses
+        strip_parent: true
+      - src: deps/usp/LICENSE.txt
+        dst: licenses/usp
+        strip_parent: true
+      - src: build/RUST-LICENSES.txt
+        dst: licenses
+        strip_parent: true
+
+nfpms:
+  - formats: [deb]
+    file_name_template: '{{ .ConventionalFileName }}'
+    description: LoRa KISS modem for SX1302 SPI concentrators with two SX1250 radios
+    homepage: https://github.com/guilhem/rak2287-radio
+    license: BSD-3-Clause
+    maintainer: Guilhem Lettron <guilhem@users.noreply.github.com>
+    section: utils
+    bindir: /usr/bin
+    dependencies:
+      - libc6 (>= 2.36)
+      - libgcc-s1
+    contents:
+      - src: packaging/sx130x-kiss.service
+        dst: /usr/lib/systemd/user/sx130x-kiss.service
+      - src: packaging/sx130x-kiss-system.service
+        dst: /usr/lib/systemd/system/sx130x-kiss-system.service
+      - src: packaging/sx130x-kiss.conf
+        dst: /usr/lib/sysusers.d/sx130x-kiss.conf
+      - src: LICENSE
+        dst: /usr/share/doc/sx130x-kiss/copyright
+      - src: NOTICE.md
+        dst: /usr/share/doc/sx130x-kiss/NOTICE.md
+      - src: driver/licenses/Semtech-sx1302-HAL.txt
+        dst: /usr/share/doc/sx130x-kiss/Semtech-sx1302-HAL.txt
+      - src: driver/licenses/Semtech-sx126x-driver.txt
+        dst: /usr/share/doc/sx130x-kiss/Semtech-sx126x-driver.txt
+      - src: deps/usp/LICENSE.txt
+        dst: /usr/share/doc/sx130x-kiss/Semtech-USP.txt
+      - src: build/RUST-LICENSES.txt
+        dst: /usr/share/doc/sx130x-kiss/RUST-LICENSES.txt
+
+homebrew_casks:
+  - description: LoRa KISS modem for SX1302 SPI concentrators with two SX1250 radios
+    homepage: https://github.com/guilhem/rak2287-radio
+    repository:
+      owner: guilhem
+      name: homebrew-tap
+      branch: master
+      token: '{{ .Env.HOMEBREW_TAP_TOKEN }}'
+    custom_block: |
+      depends_on :linux
+      artifact "sx130x-kiss.service", target: "#{HOMEBREW_PREFIX}/share/systemd/user/sx130x-kiss.service"
+      artifact "licenses", target: "#{HOMEBREW_PREFIX}/share/doc/sx130x-kiss"
+
+nix:
+  - path: sx130x-kiss.nix
+    description: LoRa KISS modem for SX1302 SPI concentrators with two SX1250 radios
+    homepage: https://github.com/guilhem/rak2287-radio
+    license: bsd3
+    extra_install: |
+      install -Dm644 sx130x-kiss.service "$out/share/systemd/user/sx130x-kiss.service"
+      mkdir -p "$out/share/doc/sx130x-kiss"
+      cp -R licenses "$out/share/doc/sx130x-kiss/"
+    repository:
+      owner: guilhem
+      name: rak2287-radio
+      branch: nix

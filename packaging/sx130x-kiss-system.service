@@ -1,0 +1,16 @@
+[Unit]
+Description=SX130x KISS modem for separate client accounts
+Documentation=https://github.com/guilhem/rak2287-radio
+
+[Service]
+Type=notify
+User=sx130x-kiss
+SupplementaryGroups=sx130x-kiss-rf0 sx130x-kiss-rf1
+RuntimeDirectory=sx130x-kiss
+RuntimeDirectoryMode=0711
+ExecStart=/usr/bin/sx130x-kiss --spi-device /dev/spidev0.0 --mode receive-only \
+    --rf0-path /run/sx130x-kiss/rf0 --rf0-group sx130x-kiss-rf0 \
+    --rf1-path /run/sx130x-kiss/rf1 --rf1-group sx130x-kiss-rf1
+
+[Install]
+WantedBy=multi-user.target

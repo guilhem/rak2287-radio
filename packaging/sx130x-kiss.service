@@ -1,0 +1,11 @@
+[Unit]
+Description=SX130x KISS modem
+Documentation=https://github.com/guilhem/rak2287-radio
+
+[Service]
+Type=exec
+# The unit sits three levels below its package prefix.
+ExecStart=%Y/../../../bin/sx130x-kiss --spi-device /dev/spidev0.0 --runtime-dir %t/sx130x-kiss --mode receive-only
+
+[Install]
+WantedBy=default.target
