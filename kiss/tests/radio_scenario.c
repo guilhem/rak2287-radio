@@ -16,7 +16,7 @@ static bool configured[2], delivered[2];
 static atomic_bool receiving;
 
 int sx1250_dual_open(const char *path, const struct sx1250_rx_config profiles[2]) {
-    assert(!strcmp(path, "/simulated-spi"));
+    assert(!strcmp(path, "/simulated-spi") || !strcmp(path, "/dev/spidev0.0"));
     for (unsigned rf = 0; rf < 2; ++rf) {
         assert(sx1250_lora_profile_valid(&profiles[rf]));
         active[rf] = profiles[rf];

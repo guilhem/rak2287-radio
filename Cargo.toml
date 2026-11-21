@@ -1,0 +1,26 @@
+[package]
+name = "sx130x-kiss"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "LoRa KISS modem for SX1302 SPI concentrators with two SX1250 radios"
+license = "BSD-3-Clause"
+publish = false
+
+[[bin]]
+name = "sx130x-kiss"
+path = "kiss/main.rs"
+
+[features]
+default = ["hardware"]
+hardware = []
+sim = []
+fake-hal = []
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+libc = "0.2"
+rustix = { version = "1.1", features = ["event", "fs", "process", "pty", "termios"] }
+
+[build-dependencies]
+cc = "1"

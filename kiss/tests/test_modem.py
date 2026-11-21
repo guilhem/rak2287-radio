@@ -4,7 +4,9 @@ from collections import deque
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from select import select
+import grp
 import os
+import stat
 import struct
 import subprocess
 import sys
@@ -14,6 +16,7 @@ import tty
 import unittest
 
 MODEM = Path(sys.argv.pop(1)).resolve()
+os.environ.pop("NOTIFY_SOCKET", None)
 FEND = b"\xc0"
 OK = b"\x06\xf0"
 PONG = b"\x06\x97"
@@ -96,13 +99,15 @@ class Port:
 
 
 class Trial:
-    def __init__(self, directory, log):
+    def __init__(self, directory, log, port_paths):
         self.directory = directory
+        self.paths = tuple(path if path is not None else directory / f"rf{rf}"
+                           for rf, path in enumerate(port_paths))
         self.gate = directory / "release-tx"
         self.log_file = log
 
     def port(self, rf):
-        return Port(self.directory / f"rf{rf}")
+        return Port(self.paths[rf])
 
     def wait_for_tx_start(self):
         deadline = time.monotonic() + 5
@@ -118,23 +123,33 @@ class Trial:
 
 class ModemTestCase(unittest.TestCase):
     @contextmanager
-    def modem(self, *, tx=True, hold_tx=False, hold_in_flight=False, directory=None,
-              device="/simulated-spi", **env):
+    def modem(self, *, mode="receive-and-transmit", hold_tx=False, hold_in_flight=False,
+              directory=None, use_default_directory=False, device="/simulated-spi",
+              port_paths=(None, None), extra_args=(), **env):
         runtime = nullcontext(directory) if directory is not None else tempfile.TemporaryDirectory()
         with runtime as dirname, tempfile.TemporaryFile() as log:
-            trial = Trial(Path(dirname), log)
+            trial = Trial(Path(dirname), log, port_paths)
             if hold_tx:
                 env["FAKE_TX_GATE"] = str(trial.gate)
             if hold_in_flight:
                 env["FAKE_TX_IN_FLIGHT"] = str(trial.gate)
-            args = [MODEM, trial.directory, device]
-            if tx:
-                args.append("--enable-transmit")
+            args = [MODEM]
+            if not use_default_directory:
+                args.extend(("--runtime-dir", trial.directory))
+            if device is not None:
+                args.extend(("--spi-device", device))
+            if mode is not None:
+                args.extend(("--mode", mode))
+            for rf, path in enumerate(port_paths):
+                if path is not None:
+                    args.extend((f"--rf{rf}-path", path))
+            args.extend(extra_args)
             with subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT,
                                   env={**os.environ, **env}) as process:
+                trial.process = process
                 try:
                     deadline = time.monotonic() + 5
-                    while b"RAK_KISS_READY" not in os.pread(log.fileno(), 8192, 0):
+                    while b"SX130X_KISS_READY" not in os.pread(log.fileno(), 8192, 0):
                         if process.poll() is not None or time.monotonic() >= deadline:
                             output = os.pread(log.fileno(), 8192, 0).decode(errors="replace")
                             self.fail(f"Modem did not report readiness\n{output}")
@@ -153,8 +168,8 @@ class ModemTestCase(unittest.TestCase):
                         log.seek(0)
                         trial.log = log.read().decode(errors="replace")
                 self.assertEqual(process.returncode, 0, trial.log)
-                self.assertFalse((trial.directory / "rf0").is_symlink())
-                self.assertFalse((trial.directory / "rf1").is_symlink())
+                for path in trial.paths:
+                    self.assertFalse(path.is_symlink())
 
     def configure(self, port, profile, sync, preamble):
         self.assertEqual(port.command(0x09, profile), OK)
@@ -163,21 +178,205 @@ class ModemTestCase(unittest.TestCase):
 
 
 class ModemTest(ModemTestCase):
+    def test_default_directory_is_private_locked_and_ready_in_receive_mode(self):
+        with tempfile.TemporaryDirectory() as name:
+            home = Path(name)
+            xdg = home / "runtime"
+            xdg.mkdir(mode=0o700)
+            for runtime_base, parent in ((str(xdg), xdg), ("", home / ".local/run")):
+                directory = parent / "sx130x-kiss"
+                settings = {"XDG_RUNTIME_DIR": runtime_base, "HOME": name}
+                with self.subTest(runtime_base=runtime_base):
+                    with self.modem(mode=None, directory=directory, use_default_directory=True,
+                                    device=None, **settings) as trial:
+                        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+                        self.assertIn(b" tx_enabled=0\n", os.pread(trial.log_file.fileno(), 8192, 0))
+                        competing = subprocess.run([MODEM], env={**os.environ, **settings},
+                                                   capture_output=True, timeout=5)
+                        self.assertNotEqual(competing.returncode, 0)
+                        self.assertIn(os.fsencode(directory), competing.stderr)
+                        self.assertIn(b"Another sx130x-kiss process", competing.stderr)
+                        with trial.port(0) as port:
+                            self.assertEqual(port.command(0x17), PONG)
+
+    def test_default_directory_does_not_adopt_a_public_directory_or_symlink(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name) / "sx130x-kiss"
+            directory.mkdir()
+            directory.chmod(0o755)
+            settings = {**os.environ, "XDG_RUNTIME_DIR": name}
+            result = subprocess.run([MODEM], env=settings, capture_output=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(os.fsencode(directory), result.stderr)
+            self.assertIn(b"mode 0700", result.stderr)
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
+            directory.rmdir()
+
+            target = Path(name) / "target"
+            target.mkdir(mode=0o700)
+            directory.symlink_to(target, target_is_directory=True)
+            result = subprocess.run([MODEM], env=settings, capture_output=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(os.fsencode(directory), result.stderr)
+            self.assertTrue(directory.is_symlink())
+            self.assertEqual(list(target.iterdir()), [])
+
+    def test_invalid_options_leave_directories_uncreated(self):
+        with tempfile.TemporaryDirectory() as name:
+            settings = {**os.environ, "XDG_RUNTIME_DIR": name}
+            for arguments, diagnostic in (
+                (("--runtime-dir", Path(name) / "ports", "--mode", "transmit"), b"invalid value"),
+                (("--runtime-dir", "relative/ports"), b"must be an absolute path"),
+                (("--rf0-path", "relative/rf0"), b"must be an absolute path"),
+                (("--rf1-path", name + "/bad/"), b"ending in a filename"),
+                (("--rf0-group", "__sx130x_missing_group__"), b"cannot resolve Unix group"),
+            ):
+                with self.subTest(arguments=arguments):
+                    result = subprocess.run([MODEM, *arguments], cwd=name, env=settings,
+                                            capture_output=True, timeout=5)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(diagnostic, result.stderr)
+                    self.assertEqual(result.stdout, b"")
+                    self.assertEqual(list(Path(name).iterdir()), [])
+
+    def test_explicit_paths_share_a_directory_alias_with_independent_access(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            actual = root / "actual"
+            directory = actual / "ports"
+            directory.mkdir(parents=True)
+            directory.chmod(0o755)
+            alias = root / "alias"
+            alias.symlink_to(actual, target_is_directory=True)
+            paths = (directory / "meshcore", alias / "ports/meshtastic")
+            try:
+                group = grp.getgrgid(os.getegid())
+            except KeyError:
+                group = None
+            group_args = ("--rf0-group", group.gr_name) if group is not None else ()
+            with self.modem(directory=root, use_default_directory=True, port_paths=paths,
+                            extra_args=group_args, HOME="", XDG_RUNTIME_DIR="") as trial:
+                self.assertEqual(stat.S_IMODE(paths[0].stat().st_mode), 0o660 if group else 0o600)
+                if group is not None:
+                    self.assertEqual(paths[0].stat().st_gid, group.gr_gid)
+                self.assertEqual(stat.S_IMODE(paths[1].stat().st_mode), 0o600)
+                expected = b"SX130X_KISS_READY rf0=%s rf1=%s tx_enabled=1\n" % (
+                    os.fsencode(paths[0]), os.fsencode(paths[1]),
+                )
+                self.assertIn(expected, os.pread(trial.log_file.fileno(), 8192, 0))
+                with trial.port(0) as rf0, trial.port(1) as rf1:
+                    self.assertEqual(rf0.command(0x17), PONG)
+                    self.assertEqual(rf1.command(0x17), PONG)
+
+    def test_custom_and_fallback_parent_directories_stay_locked(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            custom = root / "custom"
+            custom.mkdir(mode=0o700)
+            runtime = root / "runtime"
+            with self.modem(directory=runtime, port_paths=(custom / "meshcore", None)) as trial:
+                for parent in (custom, runtime):
+                    result = subprocess.run(
+                        [MODEM, "--rf0-path", parent / "other0", "--rf1-path", parent / "other1"],
+                        capture_output=True, timeout=5,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(b"Another sx130x-kiss process", result.stderr)
+                with trial.port(0) as rf0, trial.port(1) as rf1:
+                    self.assertEqual(rf0.command(0x17), PONG)
+                    self.assertEqual(rf1.command(0x17), PONG)
+
+    def test_duplicate_aliased_paths_and_links_to_live_ptys_are_refused(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            actual = root / "actual"
+            directory = actual / "ports"
+            directory.mkdir(parents=True)
+            alias = root / "alias"
+            alias.symlink_to(actual, target_is_directory=True)
+            path = directory / "shared"
+            run = [MODEM, "--rf0-path", path, "--rf1-path"]
+            result = subprocess.run([*run, alias / "ports/shared"], capture_output=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b"require distinct port paths", result.stderr)
+            self.assertEqual(list(directory.iterdir()), [])
+
+            master, slave = os.openpty()
+            target = os.ttyname(slave)
+            occupied = directory / "occupied"
+            try:
+                occupied.symlink_to(target)
+                result = subprocess.run([*run, occupied], capture_output=True, timeout=5)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"the port path is occupied", result.stderr)
+                self.assertEqual(os.readlink(occupied), target)
+                self.assertFalse(path.is_symlink())
+            finally:
+                os.close(slave)
+                os.close(master)
+
+    def test_failed_service_notification_cleans_up_both_port_links(self):
+        with tempfile.TemporaryDirectory() as name:
+            result = subprocess.run(
+                [MODEM, "--runtime-dir", name], env={**os.environ, "NOTIFY_SOCKET": "relative"},
+                capture_output=True, timeout=5,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b"cannot notify systemd", result.stderr)
+            self.assertEqual(list(Path(name).iterdir()), [])
+
     def test_runtime_directory_recovers_stale_ports_and_excludes_a_second_owner(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
-            for rf in (0, 1):
-                (directory / f"rf{rf}").symlink_to(f"/dev/pts/{2147483646 + rf}")
-            with self.modem(directory=directory) as trial, trial.port(0) as port:
-                competing = subprocess.run([MODEM, directory, "/simulated-spi"],
-                                           capture_output=True, timeout=5)
-                self.assertNotEqual(competing.returncode, 0)
-                self.assertEqual(port.command(0x17), PONG)
+            master, slave = os.openpty()
+            try:
+                tty.setraw(slave)
+                reused = os.ttyname(slave)
+                (directory / "rf0").symlink_to(reused)
+                (directory / "rf1").symlink_to("/dev/pts/2147483647")
+                with self.modem(directory=directory) as trial, trial.port(0) as port:
+                    self.assertNotEqual(os.readlink(directory / "rf0"), reused)
+                    os.write(slave, b"x")
+                    self.assertTrue(select([master], [], [], 5)[0])
+                    self.assertEqual(os.read(master, 1), b"x")
+                    competing = subprocess.run(
+                        [MODEM, "--runtime-dir", directory, "--spi-device", "/simulated-spi"],
+                        capture_output=True, timeout=5,
+                    )
+                    self.assertNotEqual(competing.returncode, 0)
+                    self.assertEqual(port.command(0x17), PONG)
+            finally:
+                os.close(slave)
+                os.close(master)
+
+    def test_partial_startup_cleans_ports_and_preserves_existing_files(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            occupied = directory / "rf1"
+            occupied.write_text("reserved")
+            result = subprocess.run(
+                [MODEM, "--runtime-dir", directory, "--spi-device", "/simulated-spi"],
+                capture_output=True, timeout=5,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((directory / "rf0").is_symlink())
+            self.assertEqual(occupied.read_text(), "reserved")
+
+    def test_readiness_preserves_linux_path_bytes(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name) / "custom" / os.fsdecode(b"radio-\xff")
+            with self.modem(directory=directory, device=None) as trial:
+                self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+                expected = (b"SX130X_KISS_READY rf0=" + os.fsencode(directory / "rf0") +
+                            b" rf1=" + os.fsencode(directory / "rf1") + b" tx_enabled=1\n")
+                self.assertIn(expected, os.pread(trial.log_file.fileno(), 8192, 0))
 
     def test_independent_phy_configuration_and_received_frames(self):
         with self.modem(FAKE_RX="1") as trial, trial.port(0) as rf0, trial.port(1) as rf1:
             self.assertEqual(rf0.command(0x17), PONG)
             self.assertEqual(rf1.command(0x11), VERSION)
+            self.assertEqual(rf0.command(0x16), b"\x06\x96SX130x RF0")
+            self.assertEqual(rf1.command(0x16), b"\x06\x96SX130x RF1")
             self.configure(rf0, PARIS, 0x2B, 16)
             self.configure(rf1, NARROW, 0x12, 24)
             self.assertEqual(rf0.command(0x0B), b"\x06\x8b" + PARIS)
@@ -277,7 +476,7 @@ class ModemTest(ModemTestCase):
         ])
 
     def test_receive_only_never_transmits(self):
-        with self.modem(tx=False) as trial, trial.port(0) as port:
+        with self.modem(mode="receive-only") as trial, trial.port(0) as port:
             self.configure(port, PARIS, 0x2B, 16)
             port.send(b"\x00\x22")
             self.assertEqual(port.event(), TX_FAILED)
@@ -320,6 +519,23 @@ class ModemTest(ModemTestCase):
                     self.assertFalse(reopened.events, "The original client no longer owns this PTY")
             finally:
                 trial.gate.touch()
+        self.assertEqual(len(trial.tx_calls), 1)
+
+    def test_shutdown_waits_for_active_transmission_and_discards_queue(self):
+        with self.modem(hold_in_flight=True) as trial, trial.port(0) as rf0, trial.port(1) as rf1:
+            try:
+                self.configure(rf0, PARIS, 0x2B, 16)
+                self.configure(rf1, NARROW, 0x12, 32)
+                rf0.send(b"\x00\x22")
+                trial.wait_for_tx_start()
+                rf1.send(b"\x00\x11")
+                self.assertEqual(rf1.command(0x17), PONG)
+                trial.process.terminate()
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    trial.process.wait(timeout=0.1)
+            finally:
+                trial.gate.touch()
+            self.assertEqual(trial.process.wait(timeout=5), 0)
         self.assertEqual(len(trial.tx_calls), 1)
 
     def test_overlong_airtime_rejects_tx_without_closing_ports(self):
